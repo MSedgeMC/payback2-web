@@ -33,6 +33,7 @@ const classMethods: Record<string, readonly string[]> = {
     "setData(Landroid/net/Uri;)Landroid/content/Intent;",
     "getData()Landroid/net/Uri;",
   ],
+  "android/net/Uri": [],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
