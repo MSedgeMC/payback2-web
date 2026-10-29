@@ -16,6 +16,8 @@ export class NativeImports {
   private readonly byName = new Map<string, NativeImport>();
   private codeCount = 0;
   private dataCount = 0;
+  private onceReturnAddress: bigint | undefined;
+  private readonly onceFrames: { control: bigint; returnAddress: bigint; stackPointer: bigint }[] = [];
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
@@ -51,7 +53,18 @@ export class NativeImports {
   }
 
   handleInterrupt(pc: bigint): boolean {
-    const symbol = this.atInterrupt(pc)?.symbol;
+    const entry = this.atInterrupt(pc), symbol = entry?.symbol;
+    if (entry && entry.address === this.onceReturnAddress) {
+      const frame = this.onceFrames.at(-1);
+      if (!frame || this.cpu.readRegister("sp") !== frame.stackPointer) throw new Error("Invalid pthread_once callback stack");
+      const bytes = readGuestBytes(this.cpu, frame.control, 4), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (view.getUint32(0, true) !== 1) throw new Error("Invalid pthread_once callback state");
+      view.setUint32(0, 2, true); writeGuestBytes(this.cpu, frame.control, bytes);
+      this.onceFrames.pop();
+      this.cpu.writeRegister("x0", 0n); this.cpu.writeRegister("x30", frame.returnAddress);
+      this.cpu.writeRegister("pc", frame.returnAddress);
+      return true;
+    }
     if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
     if (symbol.name === "getpid") {
       // Each isolated worker hosts one guest process in its own PID namespace.
@@ -80,6 +93,25 @@ export class NativeImports {
       view.setUint16(0, locking ? 1 : 0, true);
       writeGuestBytes(this.cpu, address, bytes.subarray(0, 2));
       this.cpu.writeRegister("x0", 0n);
+    } else if (symbol.name === "pthread_once") {
+      const control = this.cpu.readRegister("x0");
+      if (control % 4n) throw new RangeError("Native once control is not aligned");
+      const bytes = readGuestBytes(this.cpu, control, 4), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const state = view.getUint32(0, true);
+      if (state === 2) this.cpu.writeRegister("x0", 0n);
+      else if (state === 0) {
+        const callback = this.cpu.readRegister("x1");
+        if (callback % 4n || !this.cpu.regions.some(r => (r.permissions & 4) && callback >= r.address && callback + 4n <= r.address + r.size)) {
+          throw new RangeError("Once callback is outside executable guest memory");
+        }
+        if (this.onceFrames.length >= 32) throw new RangeError("Native once callback nesting limit exceeded");
+        this.onceReturnAddress ??= this.resolve({ name: "pthread_once:return", type: 2, binding: 1, visibility: 0,
+          section: 0, address: 0n, size: 0n });
+        view.setUint32(0, 1, true); writeGuestBytes(this.cpu, control, bytes);
+        this.onceFrames.push({ control, returnAddress: this.cpu.readRegister("x30"), stackPointer: this.cpu.readRegister("sp") });
+        this.cpu.writeRegister("x30", this.onceReturnAddress); this.cpu.writeRegister("pc", callback);
+        return true;
+      } else return false; // shortcut: an in-progress once call blocks; add wakeups with guest scheduling.
     } else if (symbol.name === "__cxa_atexit") {
       if (this.destructors.length >= 256) this.cpu.writeRegister("x0", -1n);
       else {
@@ -97,6 +129,7 @@ export class NativeImports {
 
   dispose(): void {
     this.destructors.length = 0;
+    this.onceFrames.length = 0;
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }
 }
