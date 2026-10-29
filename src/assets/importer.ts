@@ -106,6 +106,13 @@ export class BoundedZip {
   async close(): Promise<void> { if (!this.closed) { this.closed = true; await this.reader.close(); } }
 }
 
+async function verifyPackageInfo(zip: BoundedZip): Promise<void> {
+  const metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await zip.bytes("info.json", 64 * 1024)));
+  if (metadata.pname !== SUPPORTED_GAME.package || metadata.release_version !== SUPPORTED_GAME.version || Number(metadata.versioncode) !== SUPPORTED_GAME.versionCode) {
+    throw new Error("Unsupported APKM package or version");
+  }
+}
+
 export async function readPackageLibraries(file: File): Promise<{ engine: Uint8Array<ArrayBuffer>; pairip?: Uint8Array<ArrayBuffer> }> {
   const name = file.name.toLowerCase();
   if (name.endsWith(".so")) {
@@ -117,10 +124,7 @@ export async function readPackageLibraries(file: File): Promise<{ engine: Uint8A
   if (name.endsWith(".apkm")) {
     const packageZip = await BoundedZip.open(file);
     try {
-      const metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await packageZip.bytes("info.json", 64 * 1024)));
-      if (metadata.pname !== SUPPORTED_GAME.package || metadata.release_version !== SUPPORTED_GAME.version || Number(metadata.versioncode) !== SUPPORTED_GAME.versionCode) {
-        throw new Error("Unsupported APKM package or version");
-      }
+      await verifyPackageInfo(packageZip);
       apk = await packageZip.blob("split_config.arm64_v8a.apk", 64 * 1024 * 1024);
     } finally { await packageZip.close(); }
   }
@@ -135,4 +139,18 @@ export async function readPackageLibraries(file: File): Promise<{ engine: Uint8A
 
 export async function readPackageEngine(file: File): Promise<Uint8Array<ArrayBuffer>> {
   return (await readPackageLibraries(file)).engine;
+}
+
+export async function readPackageBytecode(file: File): Promise<Uint8Array<ArrayBuffer> | undefined> {
+  // shortcut: APKM supplies the base APK and native split together; add multiple APK input when the UI accepts multiple files.
+  if (!file.name.toLowerCase().endsWith(".apkm")) return undefined;
+  const packageZip = await BoundedZip.open(file);
+  let base: Blob;
+  try {
+    await verifyPackageInfo(packageZip);
+    base = await packageZip.blob("base.apk", MAX_PACKAGE_BYTES);
+  } finally { await packageZip.close(); }
+  const baseZip = await BoundedZip.open(base);
+  try { return await baseZip.bytes(SUPPORTED_GAME.startupDexName, SUPPORTED_GAME.startupDexBytes); }
+  finally { await baseZip.close(); }
 }

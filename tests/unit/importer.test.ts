@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoundedZip, readPackageEngine, readPackageLibraries, validateEntryName } from "../../src/assets/importer.ts";
+import { BoundedZip, readPackageEngine, readPackageLibraries, readPackageBytecode, validateEntryName } from "../../src/assets/importer.ts";
 import { SUPPORTED_GAME } from "../../src/assets/baseline.ts";
 import { syntheticZip } from "../fixtures/zip.ts";
+import { syntheticDex } from "../fixtures/dex.ts";
 
 test("ZIP reader lazily extracts only selected stored and deflated entries", async () => {
   const data = new TextEncoder().encode("synthetic archive fixture".repeat(100));
@@ -68,4 +69,19 @@ test("package version and missing ARM64 split fail before engine execution", asy
   await assert.rejects(readPackageEngine(new File([blob], "sample.apkm")), /Unsupported APKM/);
   await assert.rejects(readPackageEngine(new File([syntheticZip([])], "base.apk")), /missing/);
   await assert.rejects(readPackageEngine(new File([new Uint8Array(12)], "engine.so")), /size/);
+});
+
+test("startup metadata reads the selected DEX from a bounded local base APK", async () => {
+  const bytes = syntheticDex();
+  const base = syntheticZip([{ name: SUPPORTED_GAME.startupDexName, bytes, deflate: true }]);
+  const info = new TextEncoder().encode(JSON.stringify({ pname: SUPPORTED_GAME.package,
+    release_version: SUPPORTED_GAME.version, versioncode: SUPPORTED_GAME.versionCode }));
+  const packageFile = syntheticZip([
+    { name: "info.json", bytes: info },
+    { name: "base.apk", bytes: new Uint8Array(await base.arrayBuffer()), deflate: true },
+  ]);
+  assert.deepEqual(await readPackageBytecode(new File([packageFile], "game.apkm")), bytes);
+  assert.equal(await readPackageBytecode(new File([base], "base.apk")), undefined);
+  const missing = syntheticZip([{ name: "info.json", bytes: info }]);
+  await assert.rejects(readPackageBytecode(new File([missing], "missing.apkm")), /base.apk.*missing/);
 });
