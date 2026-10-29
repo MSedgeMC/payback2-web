@@ -5,6 +5,12 @@ import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts"
 import { GuestHeap } from "./heap.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
+export type NativeDispatch = void | boolean | {
+  kind: "call";
+  address: bigint;
+  args: readonly bigint[];
+  onReturn?: (value: bigint) => NativeDispatch;
+};
 
 // Unknown function imports stop at SVC; unknown data remains inaccessible.
 // shortcut: native coverage is incremental; essential missing APIs block initialization.
@@ -19,11 +25,12 @@ export class NativeImports {
   private readonly byName = new Map<string, NativeImport>();
   private codeCount = 0;
   private dataCount = 0;
-  private onceReturnAddress: bigint | undefined;
-  private readonly onceFrames: { control: bigint; returnAddress: bigint; stackPointer: bigint }[] = [];
+  private callbackReturnAddress: bigint | undefined;
+  private readonly callbackFrames: { returnAddress: bigint; stackPointer: bigint; threadPointer: bigint;
+    onReturn?: (value: bigint) => NativeDispatch }[] = [];
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
-  private readonly handlers = new Map<bigint, () => void | boolean>();
+  private readonly handlers = new Map<bigint, () => NativeDispatch>();
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
@@ -64,7 +71,7 @@ export class NativeImports {
     return entry.address;
   };
 
-  bind(symbol: ElfSymbol, handler: () => void | boolean): bigint {
+  bind(symbol: ElfSymbol, handler: () => NativeDispatch): bigint {
     if (symbol.type !== 2) throw new TypeError("Only native functions can have handlers");
     const address = this.resolve(symbol);
     if (this.handlers.has(address)) throw new Error("Native function already has a handler");
@@ -78,21 +85,14 @@ export class NativeImports {
   handleInterrupt(pc: bigint): boolean {
     const entry = this.atInterrupt(pc), symbol = entry?.symbol;
     const handler = entry && this.handlers.get(entry.address);
-    if (handler) {
-      if (handler() === false) return false;
-      this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
-      return true;
-    }
-    if (entry && entry.address === this.onceReturnAddress) {
-      const frame = this.onceFrames.at(-1);
-      if (!frame || this.cpu.readRegister("sp") !== frame.stackPointer) throw new Error("Invalid pthread_once callback stack");
-      const bytes = readGuestBytes(this.cpu, frame.control, 4), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      if (view.getUint32(0, true) !== 1) throw new Error("Invalid pthread_once callback state");
-      view.setUint32(0, 2, true); writeGuestBytes(this.cpu, frame.control, bytes);
-      this.onceFrames.pop();
-      this.cpu.writeRegister("x0", 0n); this.cpu.writeRegister("x30", frame.returnAddress);
-      this.cpu.writeRegister("pc", frame.returnAddress);
-      return true;
+    if (handler) return this.dispatch(handler());
+    if (entry && entry.address === this.callbackReturnAddress) {
+      const frame = this.callbackFrames.at(-1);
+      if (!frame || this.cpu.readRegister("sp") !== frame.stackPointer) throw new Error("Invalid native callback stack");
+      if (this.cpu.readRegister("tpidr_el0") !== frame.threadPointer) throw new Error("Invalid native callback thread");
+      this.callbackFrames.pop();
+      this.cpu.writeRegister("x30", frame.returnAddress);
+      return this.dispatch(frame.onReturn?.(this.cpu.readRegister("x0")));
     }
     if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
     if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
@@ -154,16 +154,14 @@ export class NativeImports {
       if (state === 2) this.cpu.writeRegister("x0", 0n);
       else if (state === 0) {
         const callback = this.cpu.readRegister("x1");
-        if (callback % 4n || !this.cpu.regions.some(r => (r.permissions & 4) && callback >= r.address && callback + 4n <= r.address + r.size)) {
-          throw new RangeError("Once callback is outside executable guest memory");
-        }
-        if (this.onceFrames.length >= 32) throw new RangeError("Native once callback nesting limit exceeded");
-        this.onceReturnAddress ??= this.resolve({ name: "pthread_once:return", type: 2, binding: 1, visibility: 0,
-          section: 0, address: 0n, size: 0n });
+        this.validateCallback(callback, []);
         view.setUint32(0, 1, true); writeGuestBytes(this.cpu, control, bytes);
-        this.onceFrames.push({ control, returnAddress: this.cpu.readRegister("x30"), stackPointer: this.cpu.readRegister("sp") });
-        this.cpu.writeRegister("x30", this.onceReturnAddress); this.cpu.writeRegister("pc", callback);
-        return true;
+        return this.dispatch({ kind: "call", address: callback, args: [], onReturn: () => {
+          const current = readGuestBytes(this.cpu, control, 4), currentView = new DataView(current.buffer, current.byteOffset, current.byteLength);
+          if (currentView.getUint32(0, true) !== 1) throw new Error("Invalid pthread_once callback state");
+          currentView.setUint32(0, 2, true); writeGuestBytes(this.cpu, control, current);
+          this.cpu.writeRegister("x0", 0n);
+        } });
       } else return false; // shortcut: an in-progress once call blocks; add wakeups with guest scheduling.
     } else if (symbol.name === "pthread_key_create") {
       const destination = this.cpu.readRegister("x0"), destructor = this.cpu.readRegister("x1");
@@ -203,9 +201,33 @@ export class NativeImports {
     return true;
   }
 
+  private validateCallback(address: bigint, args: readonly bigint[]): void {
+    if (address % 4n || !this.cpu.regions.some(r => (r.permissions & 4) && address >= r.address && address + 4n <= r.address + r.size)) {
+      throw new RangeError("Native callback is outside executable guest memory");
+    }
+    if (args.length > 8 || args.some(value => typeof value !== "bigint")) throw new RangeError("Native callback exceeds integer argument registers");
+    if (this.cpu.readRegister("sp") % 16n) throw new RangeError("Native callback stack is not aligned");
+    if (this.callbackFrames.length >= 32) throw new RangeError("Native callback nesting limit exceeded");
+  }
+
+  private dispatch(result: NativeDispatch): boolean {
+    if (result === false) return false;
+    if (result !== undefined && result !== true) {
+      if (result.kind !== "call") throw new TypeError("Invalid native handler result");
+      this.validateCallback(result.address, result.args);
+      this.callbackReturnAddress ??= this.resolve({ name: "native:return", type: 2, binding: 1, visibility: 0,
+        section: 0, address: 0n, size: 0n });
+      this.callbackFrames.push({ returnAddress: this.cpu.readRegister("x30"), stackPointer: this.cpu.readRegister("sp"),
+        threadPointer: this.cpu.readRegister("tpidr_el0"), onReturn: result.onReturn });
+      for (let index = 0; index < result.args.length; index++) this.cpu.writeRegister(`x${index}`, result.args[index]!);
+      this.cpu.writeRegister("x30", this.callbackReturnAddress); this.cpu.writeRegister("pc", result.address);
+    } else this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
+    return true;
+  }
+
   dispose(): void {
     this.destructors.length = 0;
-    this.onceFrames.length = 0;
+    this.callbackFrames.length = 0;
     this.threadKeys.clear();
     this.heap?.dispose();
     this.handlers.clear();
