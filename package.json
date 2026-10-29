@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "npm run prepare:runtime && tsc --noEmit",
-    "test": "npm run prepare:runtime && node --test --test-concurrency=1 tests/unit/*.test.ts",
+    "test": "npm run prepare:runtime && node --test --test-concurrency=1 tests/unit/*.test.ts tests/unit/*.test.mjs",
     "test:browser": "playwright test --workers=1",
     "test:python": "python3 -m unittest discover -s tests/tools -p 'test_*.py'",
     "bench": "npm run prepare:runtime && node tools/benchmark_runtime.ts",

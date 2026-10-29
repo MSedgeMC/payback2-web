@@ -11,7 +11,7 @@ const sourceRoots = new Set([".gitignore", "README.md", "LICENSE", "THIRD_PARTY_
 const sourcePatterns = [
   /^src\/[a-zA-Z0-9_./-]+\.(?:ts|css)$/,
   /^tools\/[a-zA-Z0-9_.-]+\.(?:py|mjs|ts)$/,
-  /^tests\/[a-zA-Z0-9_./-]+\.(?:ts|py)$/,
+  /^tests\/[a-zA-Z0-9_./-]+\.(?:ts|py|mjs)$/,
   /^public\/licenses\/(?:GPL-2\.0|ZIP-JS)\.txt$/,
   /^\.github\/workflows\/[a-zA-Z0-9_-]+\.yml$/,
 ];
