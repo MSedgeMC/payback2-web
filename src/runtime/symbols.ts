@@ -23,6 +23,7 @@ export class NativeImports {
   private readonly onceFrames: { control: bigint; returnAddress: bigint; stackPointer: bigint }[] = [];
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
+  private readonly handlers = new Map<bigint, () => void>();
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
@@ -43,10 +44,15 @@ export class NativeImports {
     }
     let entry: NativeImport;
     if (symbol.type === 2) {
-      if (this.codeCount >= 256) throw new RangeError("Diagnostic function import budget exceeded");
-      const address = this.codeBase + BigInt(this.codeCount++ * 16);
+      if (this.codeCount >= 512) throw new RangeError("Diagnostic function import budget exceeded");
+      if (this.codeCount === 256) {
+        const address = this.codeBase + 4096n;
+        this.cpu.map(address, 4096n, 5); this.mappings.push({ address, size: 4096n });
+      }
+      const address = this.codeBase + BigInt(this.codeCount * 16);
       // svc #1; ret. The owning probe dispatches supported APIs after stopping.
       this.cpu.copyIn(address, new Uint8Array([0x21, 0, 0, 0xd4, 0xc0, 3, 0x5f, 0xd6]));
+      this.codeCount++;
       entry = { symbol, address, kind: "function" };
     } else if (symbol.type === 1) {
       if (this.dataCount >= 32 || symbol.size > 4096n) throw new RangeError("Diagnostic data import budget exceeded");
@@ -58,12 +64,24 @@ export class NativeImports {
     return entry.address;
   };
 
+  bind(symbol: ElfSymbol, handler: () => void): bigint {
+    if (symbol.type !== 2) throw new TypeError("Only native functions can have handlers");
+    const address = this.resolve(symbol);
+    if (this.handlers.has(address)) throw new Error("Native function already has a handler");
+    this.handlers.set(address, handler); return address;
+  }
+
   atInterrupt(pc: bigint): NativeImport | undefined {
     return this.entries.find(entry => entry.kind === "function" && entry.address + 4n === pc);
   }
 
   handleInterrupt(pc: bigint): boolean {
     const entry = this.atInterrupt(pc), symbol = entry?.symbol;
+    const handler = entry && this.handlers.get(entry.address);
+    if (handler) {
+      handler(); this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
+      return true;
+    }
     if (entry && entry.address === this.onceReturnAddress) {
       const frame = this.onceFrames.at(-1);
       if (!frame || this.cpu.readRegister("sp") !== frame.stackPointer) throw new Error("Invalid pthread_once callback stack");
@@ -186,6 +204,7 @@ export class NativeImports {
     this.onceFrames.length = 0;
     this.threadKeys.clear();
     this.heap?.dispose();
+    this.handlers.clear();
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }
 }
