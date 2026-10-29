@@ -2,24 +2,29 @@
 
 [![CI](https://github.com/MSedgeMC/payback2-web/actions/workflows/ci.yml/badge.svg)](https://github.com/MSedgeMC/payback2-web/actions/workflows/ci.yml)
 
-An independent browser/WebAssembly compatibility runtime for Payback 2.
-Game files are supplied locally by the user and remain on their device.
+An independent WebAssembly compatibility runtime for running Payback 2 in a
+desktop browser. Users supply their own game files locally; those files remain
+on their device.
 
-**Status: early compatibility bring-up. Gameplay is not available yet.**
-Local package startup initializes the required PairIP native dependency and
-enters its JNI startup through ARM64 emulation. This path currently stops at
-Java class lookup (`JNI.FindClass`). Main engine initialization, rendering,
-game input, and audio remain unfinished.
-The current browser interface provides compatibility and initialization diagnostics.
+**Status: experimental native startup. Gameplay is not available yet.**
+The original native dependency completes initialization, registers its Java
+native method, and returns JNI version 1.6. Startup then enters the main engine's
+constructors, including Java string creation, Object arrays, and Long boxing.
+Execution currently stops at managed Java callback execution
+(`JNI.CallStaticObjectMethodV`). Engine initialization, rendering, gameplay
+input, and audio remain unfinished.
+
+The browser interface reports loading and compatibility diagnostics. It does
+not yet provide a playable scene.
 
 ## Current capabilities
 
-- ARM64 execution in WebAssembly inside a dedicated, bounded worker.
-- Validated ELF64 loading, explicit BSS initialization, and supported AArch64 RELA relocations.
-- Local APKM and ARM64 split APK import, including the native startup dependency, with baseline hash verification.
-- Standalone engine loading diagnostics.
-- Visible failures for unsupported inputs, memory access, and native calls.
-- Synthetic unit and Chromium integration checks; no proprietary game data in CI.
+- ARM64 execution in WebAssembly inside a dedicated worker with bounded execution.
+- Validated ELF64 loading, BSS initialization, AArch64 RELA relocations, and native dependency linking.
+- Local APKM and ARM64 split APK import with verification against the supported engine, dependency, and startup bytecode.
+- JNI class and method lookup, native registration, typed references, strings, Object arrays, and the observed Long constructor.
+- Explicit diagnostics for unsupported inputs, memory access, and native or Java calls.
+- Unit and Chromium integration checks using synthetic fixtures; game data is excluded from CI.
 
 The supported baseline is **Payback 2 2.106.16, version code 178, ARM64**.
 Other versions and architectures are rejected.
@@ -40,12 +45,11 @@ The production build is a static application in `dist/`. Serve it over HTTPS
 or localhost. It requires a current desktop browser with WebAssembly, BigInt,
 workers, and native decompression streams. No server receives game files.
 
-The execution runtime is pinned and hash-verified. Heavy runtime compilation
-is separate from ordinary application builds; the current build reuses an
-hash-pinned ARM64-only release built with Emscripten 4.0.23. The first preparation
-downloads the runtime and its build metadata; later preparations verify the
-local cache. The static application includes the runtime and works without
-fetching execution code at run time.
+The build uses a verified ARM64-only runtime release compiled with
+Emscripten **4.0.23**. Preparation downloads the runtime and its build metadata
+once, verifies their hashes, and reuses the local cache. Heavy runtime compilation
+is separate from ordinary application builds. Execution code is bundled with
+the static application.
 
 ## License
 
