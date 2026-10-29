@@ -6,8 +6,8 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID" };
-type JavaMethod = { className: string; name: string; descriptor: string };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID" };
+type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
@@ -34,6 +34,9 @@ const classMethods: Record<string, readonly string[]> = {
     "getData()Landroid/net/Uri;",
   ],
   "android/net/Uri": [],
+};
+const staticMethods: Record<string, readonly string[]> = {
+  "android/net/Uri": ["parse(Ljava/lang/String;)Landroid/net/Uri;"],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
@@ -70,7 +73,8 @@ export class JniEnvironment {
         21: () => this.retainGlobalReference(),
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
-        33: () => this.getMethod(),
+        33: () => this.getMethod(false),
+        113: () => this.getMethod(true),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
@@ -91,19 +95,21 @@ export class JniEnvironment {
     return true;
   }
 
-  private getMethod(): boolean {
+  private getMethod(isStatic: boolean): boolean {
     this.assertEnvironment();
     const entry = this.references.get(this.cpu.readRegister("x1"));
     if (!entry) throw new RangeError("Invalid JNI class reference");
     const decode = (index: number): string => new TextDecoder("utf-8", { fatal: true })
       .decode(readCString(this.cpu, this.cpu.readRegister(`x${index}`), 256));
     const name = decode(2), descriptor = decode(3);
-    if (name.includes("(") || !descriptor.startsWith("(") || !classMethods[entry.name]?.includes(name + descriptor)) return false;
-    let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name && method.descriptor === descriptor)?.[0];
+    const definitions = isStatic ? staticMethods : classMethods;
+    if (name.includes("(") || !descriptor.startsWith("(") || !definitions[entry.name]?.includes(name + descriptor)) return false;
+    let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name &&
+      method.descriptor === descriptor && method.isStatic === isStatic)?.[0];
     if (address === undefined) {
       if (this.methods.size >= 256) throw new RangeError("JNI method identifier limit exceeded");
       address = 0x74000000n + BigInt(this.methods.size * 8);
-      this.methods.set(address, { className: entry.name, name, descriptor });
+      this.methods.set(address, { className: entry.name, name, descriptor, isStatic });
     }
     this.cpu.writeRegister("x0", address); return true;
   }

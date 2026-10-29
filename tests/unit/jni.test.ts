@@ -137,3 +137,21 @@ test("JNI method lookup returns stable Float constructor identifiers and blocks 
     assert.equal(unknown.registers.x0, jni.environmentAddress);
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
+
+test("JNI static method lookup resolves Uri parsing and rejects instance lookup of the same method", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3);
+    for (const [offset, value] of [[0, "android/net/Uri"], [64, "parse"], [128, "(Ljava/lang/String;)Landroid/net/Uri;"]] as const) {
+      cpu.copyIn(data + BigInt(offset), new TextEncoder().encode(value + "\0"));
+    }
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    cpu.copyIn(entry, tableCall(6)); const reference = session.call(entry, [jni.environmentAddress, data]).registers.x0;
+    const args = [jni.environmentAddress, reference, data + 64n, data + 128n];
+    cpu.copyIn(entry, tableCall(113)); const method = session.call(entry, args);
+    assert.equal(method.status, "returned"); assert.notEqual(method.registers.x0, 0n);
+    assert.equal(session.call(entry, args).registers.x0, method.registers.x0);
+    cpu.copyIn(entry, tableCall(33)); const wrongKind = session.call(entry, args);
+    assert.equal(wrongKind.status, "blocked-import"); assert.equal(wrongKind.blockedSymbol, "JNI.GetMethodID");
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
