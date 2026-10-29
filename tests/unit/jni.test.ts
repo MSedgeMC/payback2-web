@@ -155,3 +155,21 @@ test("JNI static method lookup resolves Uri parsing and rejects instance lookup 
     assert.equal(wrongKind.status, "blocked-import"); assert.equal(wrongKind.blockedSymbol, "JNI.GetMethodID");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
+
+test("JNI static integer fields have stable typed identifiers and reject the wrong descriptor", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3);
+    for (const [offset, value] of [[0, "android/content/Intent"], [64, "FLAG_ACTIVITY_NEW_TASK"], [128, "I"]] as const) {
+      cpu.copyIn(data + BigInt(offset), new TextEncoder().encode(value + "\0"));
+    }
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    cpu.copyIn(entry, tableCall(6)); const reference = session.call(entry, [jni.environmentAddress, data]).registers.x0;
+    const args = [jni.environmentAddress, reference, data + 64n, data + 128n];
+    cpu.copyIn(entry, tableCall(144)); const field = session.call(entry, args);
+    assert.equal(field.status, "returned"); assert.notEqual(field.registers.x0, 0n);
+    assert.equal(session.call(entry, args).registers.x0, field.registers.x0);
+    cpu.copyIn(data + 128n, new TextEncoder().encode("J\0")); const wrongType = session.call(entry, args);
+    assert.equal(wrongType.status, "blocked-import"); assert.equal(wrongType.blockedSymbol, "JNI.GetStaticFieldID");
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
