@@ -23,7 +23,7 @@ const module = await create({ print: () => {}, printErr: message => {
   if (diagnostics.length > 4) diagnostics.shift();
 } });
 const BASE = 0x10000n, END = 0x11000n;
-const checks = { integer: false, simd: false, pressure: [] };
+const checks = { integer: false, simd: false, pressure: [], longBlock: false };
 let failure;
 
 function execute(code, setup, check) {
@@ -70,6 +70,10 @@ try {
       throw error;
     }
   }
+  execute(words(...new Array(256).fill(0x91000400), 0xd65f03c0), engine =>
+    engine.reg_write_i64(module.ARM64_REG_X0, 0n), engine =>
+    assert.equal(engine.reg_read_i64(module.ARM64_REG_X0), 256n));
+  checks.longBlock = true;
 } catch (error) { failure = error; }
 const report = { ...metadata, wasmSha256: createHash("sha256").update(payloads[0]).digest("hex"),
                  wasmBytes: payloads[0].byteLength, checks };

@@ -26,6 +26,18 @@ def enable_interpreter_assertions(source: str) -> str:
                         "#if !defined(NDEBUG)")
 
 
+def release_helper_temporaries(source: str) -> str:
+    marker = "    tcg_debug_assert(pi <= ARRAY_SIZE(op->args));\n\n#if defined(__sparc__)"
+    release = """    for (i = 0; i < nargs; i++) {
+        if (!(sizemask & (1 << (i+1)*2))) {
+            tcg_temp_free_internal(tcg_ctx, args[i]);
+        }
+    }
+
+"""
+    return replace_once(source, marker, marker.replace("#if defined(__sparc__)", release + "#if defined(__sparc__)"))
+
+
 def build(source_root: Path, output: Path) -> None:
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Heavy runtime compilation belongs on GitHub-hosted Actions")
@@ -60,6 +72,9 @@ def build(source_root: Path, output: Path) -> None:
     header = source_root / "unicorn/qemu/include/tcg/tcg.h"
     header.write_text(replace_once(header.read_text(), "#define CPU_TEMP_BUF_NLONGS 128",
                                    "#define CPU_TEMP_BUF_NLONGS TCG_MAX_TEMPS"))
+    # Release only the narrow argument extensions allocated by the upstream WASM adapter.
+    translator = source_root / "unicorn/qemu/tcg/tcg.c"
+    translator.write_text(release_helper_temporaries(translator.read_text()))
     module.generateConstants()
     module.compileUnicorn(["aarch64"])
     output.mkdir(parents=True, exist_ok=True)
