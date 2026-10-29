@@ -1,6 +1,7 @@
-import { readPackageLibraries } from "../assets/importer.ts";
-import { verifyEngine, verifyPairip } from "../assets/baseline.ts";
+import { readPackageLibraries, readPackageBytecode } from "../assets/importer.ts";
+import { verifyEngine, verifyPairip, verifyStartupBytecode } from "../assets/baseline.ts";
 import { parseElf } from "../runtime/elf.ts";
+import { readDexClass } from "../runtime/dex.ts";
 import { probeGameStartup } from "../runtime/startup.ts";
 import { createRuntime } from "../runtime/unicorn.ts";
 import { checkRuntime } from "../runtime/self-test.ts";
@@ -23,10 +24,13 @@ scope.onmessage = async (event): Promise<void> => {
       const files = await readPackageLibraries(event.data.file);
       await verifyEngine(files.engine);
       if (files.pairip) await verifyPairip(files.pairip);
+      const bytecode = await readPackageBytecode(event.data.file);
+      if (bytecode) await verifyStartupBytecode(bytecode);
+      const javaClass = bytecode ? readDexClass(bytecode, "com/pairip/VMRunner") : undefined;
       const image = parseElf(files.engine), pairip = files.pairip ? parseElf(files.pairip) : undefined;
       scope.postMessage({ kind: "status", text: "Running bounded native startup…" });
       cpu = await createRuntime();
-      const probe = probeGameStartup(cpu, image, pairip), result = probe.result;
+      const probe = probeGameStartup(cpu, image, pairip, javaClass), result = probe.result;
       const status = result.blockedSymbol ? `Initialization stopped at unimplemented native call: ${result.blockedSymbol}` : `Initialization diagnostic: ${probe.stage} / ${result.status}`;
       const serialize = (_key: string, value: unknown): unknown => typeof value === "bigint" ? `0x${value.toString(16)}` : value;
       scope.postMessage({ kind: "initialized", status, diagnostic: JSON.stringify(probe, serialize, 2) });
