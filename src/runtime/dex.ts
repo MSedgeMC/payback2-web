@@ -18,6 +18,9 @@ export type DexFile = {
   method(index: number): DexMethodReference;
   field(index: number): DexFieldReference;
 };
+export class DexClassMissing extends Error {
+  constructor(name: string) { super(`Required Java class ${name} is missing from the DEX`); }
+}
 
 export function readDex(bytes: Uint8Array): DexFile {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -199,7 +202,7 @@ export function readDex(bytes: Uint8Array): DexFile {
     }
     const result = { name, superclass, fields, methods }; cache.set(name, result); return result;
   }
-  throw new Error(`Required Java class ${name} is missing from the DEX`);
+  throw new DexClassMissing(name);
   };
   return { readClass, string, type, method: index => member(4, index), field: index => member(3, index) };
 }
