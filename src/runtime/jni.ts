@@ -2,13 +2,15 @@ import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
 import type { JavaClass } from "./dex.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
+import { decodeModifiedUtf8, MAX_MODIFIED_UTF8_BYTES } from "./modified-utf8.ts";
 import type { NativeImports } from "./symbols.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
+type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
@@ -51,7 +53,7 @@ export class JniEnvironment {
   readonly environmentAddress = this.vmAddress + 8n;
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
-  private readonly references = new Map<bigint, { name: string; global: boolean }>();
+  private readonly references = new Map<bigint, JavaValue & { global: boolean }>();
   private readonly methods = new Map<bigint, JavaMethod>();
   private readonly classes = new Map<string, JavaClass>();
   private readonly nativeMethods = new Map<string, bigint>();
@@ -84,6 +86,7 @@ export class JniEnvironment {
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
         144: () => this.getStaticField(),
+        167: () => this.newStringUtf(),
         215: () => this.registerNatives(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
@@ -118,7 +121,7 @@ export class JniEnvironment {
     this.assertEnvironment();
     const name = this.argumentString(1);
     if (!Object.hasOwn(classMethods, name) && !this.classes.has(name)) return false;
-    this.cpu.writeRegister("x0", this.addReference(name, false));
+    this.cpu.writeRegister("x0", this.addReference({ kind: "class", name }, false));
     return true;
   }
 
@@ -128,8 +131,7 @@ export class JniEnvironment {
 
   private getMethod(isStatic: boolean): boolean {
     this.assertEnvironment();
-    const entry = this.references.get(this.cpu.readRegister("x1"));
-    if (!entry) throw new RangeError("Invalid JNI class reference");
+    const entry = this.classReference(this.cpu.readRegister("x1"));
     const name = this.argumentString(2), descriptor = this.argumentString(3);
     const definitions = isStatic ? staticMethods : classMethods;
     const builtin = Object.hasOwn(definitions, entry.name) && definitions[entry.name]!.includes(name + descriptor);
@@ -147,8 +149,7 @@ export class JniEnvironment {
 
   private getStaticField(): boolean {
     this.assertEnvironment();
-    const entry = this.references.get(this.cpu.readRegister("x1"));
-    if (!entry) throw new RangeError("Invalid JNI class reference");
+    const entry = this.classReference(this.cpu.readRegister("x1"));
     const name = this.argumentString(2), descriptor = this.argumentString(3);
     const definitions = Object.hasOwn(staticFields, entry.name) ? staticFields[entry.name] : undefined;
     const value = definitions && Object.hasOwn(definitions, name) ? definitions[name] : undefined;
@@ -162,11 +163,25 @@ export class JniEnvironment {
     this.cpu.writeRegister("x0", address); return true;
   }
 
-  private addReference(name: string, global: boolean): bigint {
-    if (this.references.size >= 256) throw new RangeError("JNI class reference limit exceeded");
+  private classReference(address: bigint): { name: string } {
+    const entry = this.references.get(address);
+    if (entry?.kind !== "class") throw new RangeError("Invalid JNI class reference");
+    return entry;
+  }
+
+  private addReference(value: JavaValue, global: boolean): bigint {
+    if (this.references.size >= 256) throw new RangeError("JNI reference limit exceeded");
     const reference = this.nextReference; this.nextReference += 8n;
-    this.references.set(reference, { name, global });
+    this.references.set(reference, { ...value, global });
     return reference;
+  }
+
+  private newStringUtf(): void {
+    this.assertEnvironment();
+    const pointer = this.cpu.readRegister("x1");
+    if (pointer === 0n) { this.cpu.writeRegister("x0", 0n); return; }
+    const value = decodeModifiedUtf8(readCString(this.cpu, pointer, MAX_MODIFIED_UTF8_BYTES));
+    this.cpu.writeRegister("x0", this.addReference({ kind: "string", value }, false));
   }
 
   lookupNative(className: string, name: string, descriptor: string): bigint | undefined {
@@ -175,8 +190,7 @@ export class JniEnvironment {
 
   private registerNatives(): boolean {
     this.assertEnvironment();
-    const entry = this.references.get(this.cpu.readRegister("x1"));
-    if (!entry) throw new RangeError("Invalid JNI class reference");
+    const entry = this.classReference(this.cpu.readRegister("x1"));
     const count = Number(BigInt.asIntN(32, this.cpu.readRegister("x3"))), table = this.cpu.readRegister("x2");
     if (count < 0 || count > 256) throw new RangeError("JNI native registration count exceeds its limit");
     if (count && table % 8n) throw new RangeError("JNI native registration table is not aligned");
@@ -203,8 +217,8 @@ export class JniEnvironment {
     const reference = this.cpu.readRegister("x1");
     if (reference === 0n) { this.cpu.writeRegister("x0", 0n); return; }
     const entry = this.references.get(reference);
-    if (!entry) throw new RangeError("Invalid JNI class reference");
-    this.cpu.writeRegister("x0", this.addReference(entry.name, true));
+    if (!entry) throw new RangeError("Invalid JNI reference");
+    this.cpu.writeRegister("x0", this.addReference(entry, true));
   }
 
   private deleteReference(global: boolean): void {

@@ -93,7 +93,7 @@ test("JNI global class references retain identity after local release and reject
     const retained = call(21, global); assert.notEqual(retained, 0n);
     call(22, global); call(22, retained);
     assert.equal(call(21, 0n), 0n); call(22, 0n); call(23, 0n);
-    assert.throws(() => call(21, global), /Invalid JNI class reference/);
+    assert.throws(() => call(21, global), /Invalid JNI reference/);
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
   const staleCpu = await createRuntime(), staleSession = new NativeSession(staleCpu), staleJni = new JniEnvironment(staleCpu, staleSession.imports);
   try {
