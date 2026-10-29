@@ -50,10 +50,11 @@ export class NativeImports {
 
   handleInterrupt(pc: bigint): boolean {
     const symbol = this.atInterrupt(pc)?.symbol;
-    if (symbol?.name !== "getauxval" || symbol.version?.library !== "libc.so" || symbol.version.name !== "LIBC" ||
-        this.cpu.readRegister("x0") !== 16n) return false;
-    // AT_HWCAP advertises only FP and NEON, verified by the runtime tests.
-    this.cpu.writeRegister("x0", 3n);
+    if (symbol?.name !== "getauxval" || symbol.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
+    const query = this.cpu.readRegister("x0");
+    if (query !== 16n && query !== 26n) return false;
+    // AT_HWCAP advertises verified FP/NEON; AT_HWCAP2 advertises no extra features.
+    this.cpu.writeRegister("x0", query === 16n ? 3n : 0n);
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
   }

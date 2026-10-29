@@ -73,6 +73,9 @@ test("getauxval returns verified ARM64 features while unsupported queries remain
     assert.equal(cpu.readRegister("x0"), 3n);
     assert.equal(cpu.readRegister("pc"), end);
     assert.equal(cpu.readRegister("x19"), 123n);
+    cpu.writeRegister("x0", 26n);
+    assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+    assert.equal(cpu.readRegister("x0"), 0n);
     cpu.writeRegister("x0", 6n);
     assert.equal(imports.handleInterrupt(result.pc), false);
     assert.equal(cpu.readRegister("x0"), 6n);
