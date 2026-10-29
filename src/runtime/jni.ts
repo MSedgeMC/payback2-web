@@ -3,15 +3,16 @@ import type { ElfSymbol } from "./elf.ts";
 import type { JavaClass } from "./dex.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { decodeModifiedUtf8, MAX_MODIFIED_UTF8_BYTES } from "./modified-utf8.ts";
+import { readVariadicLong } from "./aarch64-varargs.ts";
 import type { NativeImports } from "./symbols.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string }
-  | { kind: "object-array"; elements: (JavaValue | null)[] };
+  | { kind: "object-array"; elements: (JavaValue | null)[] } | { kind: "boxed-long"; value: bigint };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Object": [],
@@ -86,6 +87,7 @@ export class JniEnvironment {
         21: () => this.retainGlobalReference(),
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
+        29: () => this.newObjectV(),
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
         144: () => this.getStaticField(),
@@ -206,6 +208,17 @@ export class JniEnvironment {
     if (initial === undefined) throw new RangeError("Invalid JNI initial element reference");
     const elements = new Array<JavaValue | null>(length).fill(initial);
     this.cpu.writeRegister("x0", this.allocateReference({ kind: "object-array", elements }, 64 + length * 8));
+    return true;
+  }
+
+  private newObjectV(): boolean {
+    this.assertEnvironment();
+    const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
+    if (!method || method.className !== clazz.name || method.name !== "<init>" || method.isStatic) throw new RangeError("Invalid JNI constructor identifier");
+    // shortcut: observed Long constructor only; add other constructors with their actual argument ABI.
+    if (clazz.name !== "java/lang/Long" || method.descriptor !== "(J)V") return false;
+    const value = readVariadicLong(this.cpu, this.cpu.readRegister("x3"));
+    this.cpu.writeRegister("x0", this.allocateReference({ kind: "boxed-long", value }, 72));
     return true;
   }
 
