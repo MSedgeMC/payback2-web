@@ -24,6 +24,7 @@ export type InitializationProbe = Omit<NativeCallProbe, "status"> & {
 
 const stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
 const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
+const maximumSlices = 100, instructionsPerSlice = 2_000;
 
 export class NativeSession {
   readonly imports: NativeImports;
@@ -119,16 +120,16 @@ export class NativeSession {
     let status: NativeCallProbe["status"] = "returned";
     let blockedSymbol: string | undefined, blockedLibrary: string | undefined;
     for (const initializer of addresses) {
-      if (sliceCount >= 20 || performance.now() - started >= 3000) {
+      if (sliceCount >= maximumSlices || performance.now() - started >= 3000) {
         status = "budget";
         last = { reason: "budget", pc: initializer, elapsedMs: 0 };
         break;
       }
       cpu.writeRegister("x30", sentinel);
       let pc = initializer;
-      while (sliceCount < 20 && performance.now() - started < 3000) {
+      while (sliceCount < maximumSlices && performance.now() - started < 3000) {
         sliceCount++;
-        last = cpu.run(pc, sentinel, 10_000);
+        last = cpu.run(pc, sentinel, instructionsPerSlice);
         pc = last.pc;
         if (last.reason === "interrupt" && imports.handleInterrupt(last.pc)) {
           pc = cpu.readRegister("pc");
@@ -150,7 +151,7 @@ export class NativeSession {
     }
     this.stopped = status !== "returned";
     return { status, completedCalls,
-      sliceCount, instructionBudget: 200_000, elapsedMs: performance.now() - started,
+      sliceCount, instructionBudget: maximumSlices * instructionsPerSlice, elapsedMs: performance.now() - started,
       wasmMemoryBytes: cpu.wasmMemoryBytes, last,
       ...(blockedSymbol ? { blockedSymbol } : {}), ...(blockedLibrary ? { blockedLibrary } : {}),
       registers: { x0: cpu.readRegister("x0"), x1: cpu.readRegister("x1"), x2: cpu.readRegister("x2"),

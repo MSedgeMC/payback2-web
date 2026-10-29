@@ -42,13 +42,14 @@ test("initializer budget exhaustion cannot be reported as successful execution",
   cpu.writeRegister("sp", previous);
   try {
     const image = parseElf(syntheticElf());
-    image.initArray!.count = 25;
-    image.relocations = Array.from({ length: 25 }, (_, index) =>
+    image.initArray!.count = 105;
+    image.relocations = Array.from({ length: 105 }, (_, index) =>
       ({ type: 1027, symbolIndex: 0, address: 0x22a0n + BigInt(index * 8), addend: 0x300n }));
     const result = probeInitialization(cpu, image);
     assert.equal(result.status, "budget");
-    assert.equal(result.completedInitializers, 20);
-    assert.equal(result.sliceCount, 20);
+    assert.equal(result.completedInitializers, 100);
+    assert.equal(result.sliceCount, 100);
+    assert.equal(result.instructionBudget, 200_000);
     assert.equal(cpu.readRegister("sp"), previous);
   } finally { cpu.close(); }
 });
