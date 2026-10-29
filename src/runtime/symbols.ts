@@ -67,6 +67,16 @@ export class NativeImports {
       const destination = this.cpu.readRegister("x0");
       const bytes = readGuestBytes(this.cpu, this.cpu.readRegister("x1"), Number(this.cpu.readRegister("x2")));
       writeGuestBytes(this.cpu, destination, bytes);
+    } else if (symbol.name === "pthread_mutex_lock" || symbol.name === "pthread_mutex_unlock") {
+      const address = this.cpu.readRegister("x0");
+      if (address % 4n) throw new RangeError("Native mutex is not aligned");
+      const bytes = readGuestBytes(this.cpu, address, 40), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const state = view.getUint16(0, true), locking = symbol.name === "pthread_mutex_lock";
+      // shortcut: uncontended normal mutexes on one guest thread; add waiting when scheduling is implemented.
+      if (state !== (locking ? 0 : 1)) return false;
+      view.setUint16(0, locking ? 1 : 0, true);
+      writeGuestBytes(this.cpu, address, bytes.subarray(0, 2));
+      this.cpu.writeRegister("x0", 0n);
     } else if (symbol.name === "__cxa_atexit") {
       if (this.destructors.length >= 256) this.cpu.writeRegister("x0", -1n);
       else {
