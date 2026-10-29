@@ -6,16 +6,18 @@ An independent browser/WebAssembly compatibility runtime for Payback 2.
 Game files are supplied locally by the user and remain on their device.
 
 **Status: early compatibility bring-up. Gameplay is not available yet.**
-The original engine executes its first initialization routine through ARM64
-emulation, then stops at the unimplemented `ExecuteProgram` call in its PairIP
-dependency. Rendering, game input, and audio remain to be implemented.
+Local package startup initializes the required PairIP native dependency and
+enters its JNI startup through ARM64 emulation. This path currently stops at
+Java class lookup (`JNI.FindClass`). Main engine initialization, rendering,
+game input, and audio remain unfinished.
 The current browser interface provides compatibility and initialization diagnostics.
 
 ## Current capabilities
 
 - ARM64 execution in WebAssembly inside a dedicated, bounded worker.
 - Validated ELF64 loading, explicit BSS initialization, and supported AArch64 RELA relocations.
-- Local APKM, ARM64 split APK, and engine-file import with baseline hash verification.
+- Local APKM and ARM64 split APK import, including the native startup dependency, with baseline hash verification.
+- Standalone engine loading diagnostics.
 - Visible failures for unsupported inputs, memory access, and native calls.
 - Synthetic unit and Chromium integration checks; no proprietary game data in CI.
 
