@@ -1,4 +1,5 @@
 import type { RuntimeAdapter } from "./adapter.ts";
+import { MAX_TRANSFER_BYTES } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { GuestHeap } from "./heap.ts";
@@ -104,6 +105,11 @@ export class NativeImports {
       // The browser guest has an empty Android property area: missing keys return zero and an empty string.
       writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), new Uint8Array([0]));
       this.cpu.writeRegister("x0", 0n);
+    } else if (symbol.name === "memset") {
+      const size = Number(this.cpu.readRegister("x2"));
+      if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_BYTES) throw new RangeError("Native fill exceeds its byte limit");
+      const value = Number(this.cpu.readRegister("x1") & 255n);
+      writeGuestBytes(this.cpu, this.cpu.readRegister("x0"), new Uint8Array(size).fill(value));
     } else if (symbol.name === "memcpy") {
       const destination = this.cpu.readRegister("x0");
       const bytes = readGuestBytes(this.cpu, this.cpu.readRegister("x1"), Number(this.cpu.readRegister("x2")));
