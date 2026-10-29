@@ -20,15 +20,16 @@ test("JNI Object arrays preserve null initialization and retain initial values a
     };
     const clazz = call(6, [data]), initial = call(167, [data + 17n]);
     const empty = call(172, [0n, clazz, 0n]), array = call(172, [2n, clazz, 0n]), filled = call(172, [0x100000002n, clazz, initial]);
-    const references = (jni as unknown as { references: Map<bigint, { elements: ({ value?: string } | null)[] }> }).references;
-    assert.deepEqual(references.get(empty)!.elements, []); assert.deepEqual(references.get(array)!.elements, [null, null]);
-    const values = references.get(filled)!.elements;
-    assert.equal(values.length, 2); assert.equal(values[0]?.value, "initial"); assert.equal(values[1], values[0]);
+    const elements = (handle: bigint) => { const value = jni.referenceValue(handle); assert.ok(value?.kind === "object-array"); return value.elements; };
+    assert.deepEqual(elements(empty), []); assert.deepEqual(elements(array), [null, null]);
+    const object = jni.referenceValue(filled), values = elements(filled);
+    assert.equal(values.length, 2); assert.deepEqual(values[0], { kind: "string", value: "initial" }); assert.equal(values[1], values[0]);
     call(174, [array, 0x100000001n, initial]);
-    assert.equal(references.get(array)!.elements[1], values[0]);
+    assert.equal(elements(array)[1], values[0]);
     const retained = call(21, [filled]); call(23, [initial]); call(23, [filled]);
-    assert.equal(references.get(retained)!.elements, values); assert.equal(values[0]?.value, "initial");
-    assert.equal(references.get(array)!.elements[1]?.value, "initial");
+    assert.equal(jni.referenceValue(retained), object); assert.equal(elements(retained), values);
+    assert.deepEqual(values[0], { kind: "string", value: "initial" }); assert.equal(elements(array)[1], values[0]);
+    assert.equal(jni.referenceValue(0n), null); assert.throws(() => jni.referenceValue(initial), /reference/);
     call(174, [retained, 1n, 0n]); assert.equal(values[1], null);
     cpu.copyIn(entry, tableCall(33));
     assert.throws(() => session.call(entry, [jni.environmentAddress, array, data, data]), /class reference/);
@@ -50,8 +51,7 @@ test("JNI Object array writes validate array types, signed indexes, and element 
     assert.throws(() => set(clazz, 0n, 0n), /array reference/);
     assert.throws(() => set(array, -1n, 0n), /index/); assert.throws(() => set(array, 1n, 0n), /index/);
     assert.throws(() => set(array, 0n, 42n), /element reference/);
-    const references = (jni as unknown as { references: Map<bigint, { elements: unknown[] }> }).references;
-    assert.deepEqual(references.get(array)!.elements, [null]);
+    assert.deepEqual(jni.referenceValue(array), { kind: "object-array", elements: [null] });
     assert.equal(session.imports.atInterrupt(cpu.readRegister("pc"))?.symbol.name, "JNI.SetObjectArrayElement");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });

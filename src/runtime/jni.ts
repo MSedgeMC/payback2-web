@@ -5,14 +5,13 @@ import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts"
 import { decodeModifiedUtf8, MAX_MODIFIED_UTF8_BYTES } from "./modified-utf8.ts";
 import { readVariadicLong } from "./aarch64-varargs.ts";
 import type { NativeImports } from "./symbols.ts";
+import type { JavaValue } from "./java-values.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
 const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 174: "SetObjectArrayElement", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
-type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string }
-  | { kind: "object-array"; elements: (JavaValue | null)[] } | { kind: "boxed-long"; value: bigint };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Object": [],
@@ -56,7 +55,7 @@ export class JniEnvironment {
   readonly environmentAddress = this.vmAddress + 8n;
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
-  private readonly references = new Map<bigint, JavaValue & { global: boolean }>();
+  private readonly references = new Map<bigint, { value: JavaValue; global: boolean }>();
   private readonly methods = new Map<bigint, JavaMethod>();
   private readonly classes = new Map<string, JavaClass>();
   private readonly nativeMethods = new Map<string, bigint>();
@@ -171,7 +170,7 @@ export class JniEnvironment {
   }
 
   private classReference(address: bigint): { name: string } {
-    const entry = this.references.get(address);
+    const entry = this.references.get(address)?.value;
     if (entry?.kind !== "class") throw new RangeError("Invalid JNI class reference");
     return entry;
   }
@@ -179,7 +178,7 @@ export class JniEnvironment {
   private addReference(value: JavaValue, global: boolean): bigint {
     if (this.references.size >= 256) throw new RangeError("JNI reference limit exceeded");
     const reference = this.nextReference; this.nextReference += 8n;
-    this.references.set(reference, { ...value, global });
+    this.references.set(reference, { value, global });
     return reference;
   }
 
@@ -205,7 +204,7 @@ export class JniEnvironment {
     const elementClass = this.classReference(this.cpu.readRegister("x2"));
     // shortcut: Object arrays only; add assignability when an observed caller needs a typed array.
     if (elementClass.name !== "java/lang/Object") return false;
-    const initialHandle = this.cpu.readRegister("x3"), initial = initialHandle === 0n ? null : this.references.get(initialHandle);
+    const initialHandle = this.cpu.readRegister("x3"), initial = initialHandle === 0n ? null : this.references.get(initialHandle)?.value;
     if (initial === undefined) throw new RangeError("Invalid JNI initial element reference");
     const elements = new Array<JavaValue | null>(length).fill(initial);
     this.cpu.writeRegister("x0", this.allocateReference({ kind: "object-array", elements }, 64 + length * 8));
@@ -225,17 +224,25 @@ export class JniEnvironment {
 
   private setObjectArrayElement(): void {
     this.assertEnvironment();
-    const array = this.references.get(this.cpu.readRegister("x1"));
+    const array = this.references.get(this.cpu.readRegister("x1"))?.value;
     if (array?.kind !== "object-array") throw new RangeError("Invalid JNI Object array reference");
     const index = Number(BigInt.asIntN(32, this.cpu.readRegister("x2")));
     if (index < 0 || index >= array.elements.length) throw new RangeError("JNI Object array index is outside bounds");
-    const handle = this.cpu.readRegister("x3"), value = handle === 0n ? null : this.references.get(handle);
+    const handle = this.cpu.readRegister("x3"), value = handle === 0n ? null : this.references.get(handle)?.value;
     if (value === undefined) throw new RangeError("Invalid JNI array element reference");
     array.elements[index] = value;
   }
 
   lookupNative(className: string, name: string, descriptor: string): bigint | undefined {
     return this.nativeMethods.get(`${className}\0${name}\0${descriptor}`);
+  }
+
+  referenceValue(reference: bigint): JavaValue | null {
+    if (this.disposed) throw new Error("JNI environment is disposed");
+    if (reference === 0n) return null;
+    const entry = this.references.get(reference);
+    if (!entry) throw new RangeError("Invalid JNI reference");
+    return entry.value;
   }
 
   private registerNatives(): boolean {
@@ -268,7 +275,7 @@ export class JniEnvironment {
     if (reference === 0n) { this.cpu.writeRegister("x0", 0n); return; }
     const entry = this.references.get(reference);
     if (!entry) throw new RangeError("Invalid JNI reference");
-    this.cpu.writeRegister("x0", this.addReference(entry, true));
+    this.cpu.writeRegister("x0", this.addReference(entry.value, true));
   }
 
   private deleteReference(global: boolean): void {

@@ -22,13 +22,13 @@ test("JNI NewObjectV boxes exact signed Java Long values from the AArch64 argume
     const clazz = call(6, [data]), method = call(33, [clazz, data + 64n, data + 128n]);
     const va = new Uint8Array(32), view = new DataView(va.buffer), argument = new Uint8Array(8);
     view.setBigUint64(0, data + 896n, true); view.setBigUint64(8, data + 768n, true); view.setInt32(24, -40, true); cpu.copyIn(data + 512n, va);
-    const references = (jni as unknown as { references: Map<bigint, { kind: string; value: bigint }> }).references;
     for (const value of [-0x8000000000000000n, -0x123456789abcdefn, 0x7fffffffffffffffn]) {
       new DataView(argument.buffer).setBigInt64(0, value, true); cpu.copyIn(data + 728n, argument);
       const local = call(29, [clazz, method, data + 512n]);
-      assert.equal(references.get(local)?.kind, "boxed-long"); assert.equal(references.get(local)?.value, value);
+      assert.deepEqual(jni.referenceValue(local), { kind: "boxed-long", value });
+      const object = jni.referenceValue(local);
       assert.deepEqual(cpu.copyOut(data + 512n, 32), va);
-      const global = call(21, [local]); call(23, [local]); assert.equal(references.get(global)?.value, value); call(22, [global]);
+      const global = call(21, [local]); call(23, [local]); assert.equal(jni.referenceValue(global), object); call(22, [global]);
     }
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); assert.equal(cpu.regions.length, 0); cpu.close(); }
 });
