@@ -172,3 +172,30 @@ test("memcpy copies only the requested bytes, returns its destination, and rejec
     assert.deepEqual(cpu.copyOut(destination, 5), new Uint8Array([9, 1, 2, 3, 9]));
   } finally { imports.dispose(); cpu.close(); }
 });
+
+test("C++ exit registration retains callbacks, rejects invalid code, and reports a full table", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu);
+  try {
+    const symbol = { ...parseElf(syntheticElf()).symbols[1]!, name: "__cxa_atexit",
+                     version: { name: "LIBC", library: "libc.so" } };
+    const address = imports.resolve(symbol), callback = 0x20000n, end = 0x7fff0000n;
+    cpu.map(callback, 4096n, 5); cpu.copyIn(callback, words(0xd65f03c0));
+    const register = (fn: bigint, argument: bigint): void => {
+      cpu.writeRegister("x0", fn); cpu.writeRegister("x1", argument); cpu.writeRegister("x2", 0xfedcba9876543210n);
+      cpu.writeRegister("x30", end);
+      assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+    };
+    assert.throws(() => register(0n, 0n), /executable/);
+    assert.equal(imports.destructors.length, 0);
+    for (let index = 0; index < 256; index++) {
+      register(callback, BigInt(index));
+      assert.equal(cpu.readRegister("x0"), 0n);
+    }
+    assert.deepEqual(imports.destructors[255], { callback, argument: 255n, dso: 0xfedcba9876543210n });
+    register(callback, 256n);
+    assert.equal(BigInt.asIntN(32, cpu.readRegister("x0")), -1n);
+    assert.equal(imports.destructors.length, 256);
+    const finalize = imports.resolve({ ...symbol, name: "__cxa_finalize" });
+    assert.equal(imports.handleInterrupt(cpu.run(finalize, end, 20).pc), false);
+  } finally { imports.dispose(); assert.equal(imports.destructors.length, 0); cpu.close(); }
+});

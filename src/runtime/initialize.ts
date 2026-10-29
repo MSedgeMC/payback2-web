@@ -6,6 +6,7 @@ import { NativeImports } from "./symbols.ts";
 export type InitializationProbe = {
   status: "blocked-import" | "blocked-interrupt" | "fault" | "budget" | "initializers-returned";
   completedInitializers: number;
+  registeredDestructors: number;
   initializerCount: number;
   sliceCount: number;
   instructionBudget: number;
@@ -67,7 +68,7 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
       if (last.reason === "budget") { status = "budget"; break; }
       completedInitializers++;
     }
-    return { status, completedInitializers, initializerCount: loaded.initializers.length,
+    return { status, completedInitializers, registeredDestructors: imports.destructors.length, initializerCount: loaded.initializers.length,
       sliceCount, instructionBudget: 200_000, elapsedMs: performance.now() - started,
       wasmMemoryBytes: cpu.wasmMemoryBytes, last,
       ...(blockedSymbol ? { blockedSymbol } : {}), ...(blockedLibrary ? { blockedLibrary } : {}),

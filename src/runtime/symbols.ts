@@ -8,6 +8,7 @@ export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function
 // shortcut: native coverage is incremental; essential missing APIs block initialization.
 export class NativeImports {
   readonly entries: NativeImport[] = [];
+  readonly destructors: { callback: bigint; argument: bigint; dso: bigint }[] = [];
   private readonly cpu: RuntimeAdapter;
   private readonly codeBase: bigint;
   private readonly dataBase: bigint;
@@ -66,12 +67,23 @@ export class NativeImports {
       const destination = this.cpu.readRegister("x0");
       const bytes = readGuestBytes(this.cpu, this.cpu.readRegister("x1"), Number(this.cpu.readRegister("x2")));
       writeGuestBytes(this.cpu, destination, bytes);
+    } else if (symbol.name === "__cxa_atexit") {
+      if (this.destructors.length >= 256) this.cpu.writeRegister("x0", -1n);
+      else {
+        const callback = this.cpu.readRegister("x0");
+        if (!this.cpu.regions.some(r => (r.permissions & 4) && callback >= r.address && callback < r.address + r.size)) {
+          throw new RangeError("Destructor callback is outside executable guest memory");
+        }
+        this.destructors.push({ callback, argument: this.cpu.readRegister("x1"), dso: this.cpu.readRegister("x2") });
+        this.cpu.writeRegister("x0", 0n);
+      }
     } else return false;
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
   }
 
   dispose(): void {
+    this.destructors.length = 0;
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }
 }
