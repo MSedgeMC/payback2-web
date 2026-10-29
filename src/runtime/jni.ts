@@ -6,7 +6,10 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID" };
+type JavaMethod = { className: string; name: string; descriptor: string };
+// shortcut: observed standard Java methods only; extend definitions when native callers require them.
+const classMethods: Record<string, readonly string[]> = { "java/lang/Float": ["<init>(F)V"] };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
 
@@ -16,6 +19,7 @@ export class JniEnvironment {
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
   private readonly references = new Map<bigint, { name: string; global: boolean }>();
+  private readonly methods = new Map<bigint, JavaMethod>();
   private nextReference = 0x73000000n;
   private mapped = false;
   private disposed = false;
@@ -39,6 +43,7 @@ export class JniEnvironment {
         21: () => this.retainGlobalReference(),
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
+        33: () => this.getMethod(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
@@ -54,10 +59,26 @@ export class JniEnvironment {
   private findClass(): boolean {
     this.assertEnvironment();
     const name = new TextDecoder("utf-8", { fatal: true }).decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256));
-    // shortcut: the standard Float class only; add class definitions when an observed caller requires them.
-    if (name !== "java/lang/Float") return false;
+    if (!Object.hasOwn(classMethods, name)) return false;
     this.cpu.writeRegister("x0", this.addReference(name, false));
     return true;
+  }
+
+  private getMethod(): boolean {
+    this.assertEnvironment();
+    const entry = this.references.get(this.cpu.readRegister("x1"));
+    if (!entry) throw new RangeError("Invalid JNI class reference");
+    const decode = (index: number): string => new TextDecoder("utf-8", { fatal: true })
+      .decode(readCString(this.cpu, this.cpu.readRegister(`x${index}`), 256));
+    const name = decode(2), descriptor = decode(3);
+    if (!classMethods[entry.name]?.includes(name + descriptor)) return false;
+    let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name && method.descriptor === descriptor)?.[0];
+    if (address === undefined) {
+      if (this.methods.size >= 256) throw new RangeError("JNI method identifier limit exceeded");
+      address = 0x74000000n + BigInt(this.methods.size * 8);
+      this.methods.set(address, { className: entry.name, name, descriptor });
+    }
+    this.cpu.writeRegister("x0", address); return true;
   }
 
   private addReference(name: string, global: boolean): bigint {
@@ -105,6 +126,7 @@ export class JniEnvironment {
     if (this.disposed) return;
     this.disposed = true;
     this.references.clear();
+    this.methods.clear();
     if (this.mapped) this.cpu.unmap(this.vmAddress, 4096n);
   }
 }

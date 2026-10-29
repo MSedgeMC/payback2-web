@@ -97,3 +97,24 @@ test("JNI global class references retain identity after local release and reject
     assert.throws(() => staleSession.call(entry, [staleJni.environmentAddress, 0x73000000n]), /Invalid JNI class reference/);
   } finally { staleJni.dispose(); staleSession.dispose(); staleCpu.close(); }
 });
+
+test("JNI method lookup returns stable Float constructor identifiers and blocks unknown descriptors", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3);
+    for (const [offset, value] of [[0, "java/lang/Float"], [64, "<init>"], [128, "(F)V"]] as const) {
+      cpu.copyIn(data + BigInt(offset), new TextEncoder().encode(value + "\0"));
+    }
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    cpu.copyIn(entry, tableCall(6)); const local = session.call(entry, [jni.environmentAddress, data]).registers.x0;
+    cpu.copyIn(entry, tableCall(21)); const global = session.call(entry, [jni.environmentAddress, local]).registers.x0;
+    cpu.copyIn(entry, tableCall(33));
+    const method = session.call(entry, [jni.environmentAddress, local, data + 64n, data + 128n]);
+    assert.equal(method.status, "returned"); assert.notEqual(method.registers.x0, 0n);
+    assert.equal(session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]).registers.x0, method.registers.x0);
+    cpu.copyIn(data + 128n, new TextEncoder().encode("(I)V\0"));
+    const unknown = session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]);
+    assert.equal(unknown.status, "blocked-import"); assert.equal(unknown.blockedSymbol, "JNI.GetMethodID");
+    assert.equal(unknown.registers.x0, jni.environmentAddress);
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
