@@ -13,7 +13,7 @@ const classMethods: Record<string, readonly string[]> = {
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
   "java/lang/Double": ["<init>(D)V", "doubleValue()D"],
   "java/lang/Long": ["<init>(J)V", "longValue()J"],
-  "java/lang/Integer": [],
+  "java/lang/Integer": ["<init>(I)V"],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
