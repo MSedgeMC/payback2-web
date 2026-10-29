@@ -105,3 +105,23 @@ test("initializer native calls resume correctly and repeated calls stay bounded"
     } finally { cpu.close(); }
   }
 });
+
+test("absent Android properties return an empty value and invalid guest pointers fail", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu);
+  try {
+    const symbol = { ...parseElf(syntheticElf()).symbols[1]!, name: "__system_property_get",
+                     version: { name: "LIBC", library: "libc.so" } };
+    const address = imports.resolve(symbol), data = 0x20000n, end = 0x7fff0000n;
+    cpu.map(data, 4096n, 3);
+    cpu.copyIn(data, new TextEncoder().encode("synthetic.missing\0"));
+    cpu.copyIn(data + 128n, new Uint8Array([42, 43]));
+    cpu.writeRegister("x0", data); cpu.writeRegister("x1", data + 128n); cpu.writeRegister("x30", end);
+    assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+    assert.equal(cpu.readRegister("x0"), 0n);
+    assert.deepEqual(cpu.copyOut(data + 128n, 2), new Uint8Array([0, 43]));
+    cpu.writeRegister("x0", data + 4096n);
+    assert.throws(() => imports.handleInterrupt(cpu.run(address, end, 20).pc), /readable/);
+    cpu.writeRegister("x0", data); cpu.writeRegister("x1", data + 4096n);
+    assert.throws(() => imports.handleInterrupt(cpu.run(address, end, 20).pc), /writable/);
+  } finally { imports.dispose(); cpu.close(); }
+});

@@ -1,5 +1,6 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
+import { readCString, writeGuestBytes } from "./guest-memory.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
 
@@ -50,11 +51,18 @@ export class NativeImports {
 
   handleInterrupt(pc: bigint): boolean {
     const symbol = this.atInterrupt(pc)?.symbol;
-    if (symbol?.name !== "getauxval" || symbol.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
-    const query = this.cpu.readRegister("x0");
-    if (query !== 16n && query !== 26n) return false;
-    // AT_HWCAP advertises verified FP/NEON; AT_HWCAP2 advertises no extra features.
-    this.cpu.writeRegister("x0", query === 16n ? 3n : 0n);
+    if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
+    if (symbol.name === "getauxval") {
+      const query = this.cpu.readRegister("x0");
+      if (query !== 16n && query !== 26n) return false;
+      // AT_HWCAP advertises verified FP/NEON; AT_HWCAP2 advertises no extra features.
+      this.cpu.writeRegister("x0", query === 16n ? 3n : 0n);
+    } else if (symbol.name === "__system_property_get") {
+      readCString(this.cpu, this.cpu.readRegister("x0"), 128);
+      // The browser guest has an empty Android property area: missing keys return zero and an empty string.
+      writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), new Uint8Array([0]));
+      this.cpu.writeRegister("x0", 0n);
+    } else return false;
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
   }
