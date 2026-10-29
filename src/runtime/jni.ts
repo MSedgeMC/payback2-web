@@ -9,7 +9,10 @@ export function isSupportedJniVersion(value: number): boolean { return supported
 const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID" };
 type JavaMethod = { className: string; name: string; descriptor: string };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
-const classMethods: Record<string, readonly string[]> = { "java/lang/Float": ["<init>(F)V", "floatValue()F"] };
+const classMethods: Record<string, readonly string[]> = {
+  "java/lang/Float": ["<init>(F)V", "floatValue()F"],
+  "java/lang/Double": [],
+};
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
 

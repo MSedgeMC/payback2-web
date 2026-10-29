@@ -49,13 +49,14 @@ test("essential JNI methods remain visible failures rather than fabricated Java 
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
 
-test("JNI Float class lookup creates bounded local handles and validates guest strings", async () => {
+test("JNI standard class lookup creates bounded local handles and validates guest strings", async () => {
   const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
   try {
     cpu.map(data, 4096n, 3); cpu.copyIn(data, new TextEncoder().encode("java/lang/Float\0"));
     const image = parseElf(syntheticElf()); image.bytes.set(tableCall(6), 0x300);
     const entry = session.load("jni_fixture.so", image, 0x10000000n).lookupExport("local"), references = new Set<bigint>();
     for (let index = 0; index < 256; index++) {
+      cpu.copyIn(data, new TextEncoder().encode((index % 2 ? "java/lang/Double" : "java/lang/Float") + "\0"));
       const result = session.call(entry, [jni.environmentAddress, data]);
       assert.equal(result.status, "returned"); assert.notEqual(result.registers.x0, 0n);
       references.add(result.registers.x0);
