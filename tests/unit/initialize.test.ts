@@ -23,7 +23,7 @@ test("initializer code reads the ARM64 TLS stack guard and restores its caller's
   const previous = 0x55000000n, copies = new Map<bigint, Uint8Array>();
   const copyIn = cpu.copyIn.bind(cpu);
   cpu.copyIn = (address, bytes) => { if (bytes.length === 8) copies.set(address, bytes.slice()); copyIn(address, bytes); };
-  cpu.writeRegister("tpidr_el0", previous);
+  cpu.writeRegister("tpidr_el0", previous); cpu.writeRegister("sp", previous + 4096n);
   try {
     const result = probeInitialization(cpu, image);
     assert.equal(result.status, "initializers-returned");
@@ -31,12 +31,15 @@ test("initializer code reads the ARM64 TLS stack guard and restores its caller's
     assert.ok(guard);
     assert.equal(result.registers.x1, new DataView(guard.buffer).getBigUint64(0, true));
     assert.equal(cpu.readRegister("tpidr_el0"), previous);
+    assert.equal(cpu.readRegister("sp"), previous + 4096n);
     assert.equal(cpu.regions.length, 0);
   } finally { cpu.close(); }
 });
 
 test("initializer budget exhaustion cannot be reported as successful execution", async () => {
   const cpu = await createRuntime();
+  const previous = 0x55000000n;
+  cpu.writeRegister("sp", previous);
   try {
     const image = parseElf(syntheticElf());
     image.initArray!.count = 25;
@@ -46,6 +49,7 @@ test("initializer budget exhaustion cannot be reported as successful execution",
     assert.equal(result.status, "budget");
     assert.equal(result.completedInitializers, 20);
     assert.equal(result.sliceCount, 20);
+    assert.equal(cpu.readRegister("sp"), previous);
   } finally { cpu.close(); }
 });
 

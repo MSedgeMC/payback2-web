@@ -22,6 +22,7 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
   const base = 0x10000000n, stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
   const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
   const previousThreadPointer = cpu.readRegister("tpidr_el0");
+  const previousStackPointer = cpu.readRegister("sp");
   const imports = new NativeImports(cpu);
   let loaded: ReturnType<typeof loadElf> | undefined;
   let stackMapped = false;
@@ -76,6 +77,7 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
                    x8: cpu.readRegister("x8"), x30: cpu.readRegister("x30"), sp: cpu.readRegister("sp") },
     };
   } finally {
+    cpu.writeRegister("sp", previousStackPointer);
     cpu.writeRegister("tpidr_el0", previousThreadPointer);
     if (stackMapped) cpu.unmap(stack, ownedStackSize);
     loaded?.dispose(); imports.dispose();
