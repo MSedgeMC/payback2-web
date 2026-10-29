@@ -14,7 +14,7 @@ export type Segment = {
 };
 export type SymbolVersion = { name: string; library: string };
 export type ElfSymbol = {
-  name: string; type: number; binding: number; section: number;
+  name: string; type: number; binding: number; visibility: number; section: number;
   address: bigint; size: bigint; version?: SymbolVersion;
 };
 export type Relocation = { address: bigint; type: number; symbolIndex: number; addend: bigint };
@@ -225,9 +225,11 @@ export function parseElf(bytes: Uint8Array): ElfImage {
     const offset = symoff + index * 24;
     const symbol: ElfSymbol = {
       name: string(u32(offset)), type: bytes[offset + 4]! & 15, binding: bytes[offset + 4]! >> 4,
+      visibility: bytes[offset + 5]! & 3,
       section: u16(offset + 6), address: u64(offset + 8), size: u64(offset + 16),
     };
     assert(symbol.type !== 6 && symbol.section !== 0xfff2, "TLS and common symbols are unsupported");
+    assert((bytes[offset + 5]! & ~3) === 0, "Unsupported ELF symbol calling convention");
     if (versym !== undefined) {
       const version = u16(versym + index * 2) & 0x7fff;
       if (version >= 2) {
@@ -349,7 +351,12 @@ export function loadElf(cpu: RuntimeAdapter, image: ElfImage, base: bigint, reso
         }
       }
     }
-    const exports = new Map(image.symbols.filter(s => s.section !== 0 && s.name).map(s => [s.name, s]));
+    const exports = new Map<string, ElfSymbol>();
+    for (const symbol of image.symbols) {
+      if (!symbol.name || symbol.section === 0 || ![1, 2].includes(symbol.binding) || ![0, 3].includes(symbol.visibility)) continue;
+      assert(!exports.has(symbol.name), `Duplicate unversioned ELF export ${symbol.name}`);
+      exports.set(symbol.name, symbol);
+    }
     return { image, base, initializers, dispose,
       lookupExport(name: string): bigint {
         const symbol = exports.get(name); assert(symbol, `ELF export ${name} is missing`);

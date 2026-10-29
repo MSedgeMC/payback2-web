@@ -32,6 +32,23 @@ test("unresolved imports fail before mapping or executing the image", async () =
   } finally { cpu.close(); }
 });
 
+test("ELF exports respect symbol binding and visibility and reject duplicate definitions", async () => {
+  const cpu = await createRuntime();
+  try {
+    for (const attributes of [{ binding: 0 }, { visibility: 1 }, { visibility: 2 }]) {
+      const image = parseElf(syntheticElf()); Object.assign(image.symbols[2]!, attributes);
+      const loaded = loadElf(cpu, image, 0x10000n, () => 0x50000000n);
+      assert.throws(() => loaded.lookupExport("local"), /missing/);
+      loaded.dispose();
+    }
+    const image = parseElf(syntheticElf()); image.symbols.push({ ...image.symbols[2]! });
+    assert.throws(() => loadElf(cpu, image, 0x10000n, () => 0x50000000n), /Duplicate/);
+    assert.equal(cpu.regions.length, 0);
+    const variant = syntheticElf(); variant[0x1235] = 0x80;
+    assert.throws(() => parseElf(variant), /calling convention/);
+  } finally { cpu.close(); }
+});
+
 test("malformed ELF headers, segment overlap, and out-of-bounds ranges are rejected", () => {
   for (const [offset, value] of [[18, 62], [5, 2], [54, 48]] as const) {
     const bytes = syntheticElf(); bytes[offset] = value;
