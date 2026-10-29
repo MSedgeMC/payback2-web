@@ -11,7 +11,7 @@ type JavaMethod = { className: string; name: string; descriptor: string };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
-  "java/lang/Double": ["<init>(D)V"],
+  "java/lang/Double": ["<init>(D)V", "doubleValue()D"],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
