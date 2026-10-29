@@ -5,6 +5,7 @@ import type { NativeImports } from "./symbols.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
+export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
 const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass" };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
@@ -50,7 +51,7 @@ export class JniEnvironment {
   private getEnvironment(): void {
     if (this.disposed || this.cpu.readRegister("x0") !== this.vmAddress) throw new Error("Foreign JavaVM");
     const requestedVersion = Number(BigInt.asUintN(32, this.cpu.readRegister("x2")));
-    const result = !supportedVersions.has(requestedVersion) ? -3
+    const result = !isSupportedJniVersion(requestedVersion) ? -3
       : this.cpu.readRegister("tpidr_el0") !== this.threadPointer ? -2 : 0;
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, result === 0 ? this.environmentAddress : 0n, true);
