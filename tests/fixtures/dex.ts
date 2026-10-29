@@ -12,8 +12,18 @@ export function syntheticDex(): Uint8Array {
   });
   [0, 1, 2].forEach((value, index) => u32(132 + index * 4, value));
   u32(148, 2); u32(152, 208); u32(208, 1); view.setUint16(212, 1, true);
-  u32(160, 3); u32(168, 4); u32(172, 0); u32(196, 216);
+  u32(160, 3); u32(168, 4); u32(172, 0); u32(180, 2); u32(196, 216);
   // No fields; one static native method and one instance native method.
   bytes.set([0, 0, 1, 1, 0, 0x89, 2, 0, 1, 0x81, 2, 0], 216);
+  return bytes;
+}
+
+export function syntheticManagedDex(instructions = [0x1007, 0x0011]): Uint8Array {
+  const bytes = syntheticDex(), view = new DataView(bytes.buffer);
+  // A static managed method with one object input: move-object v0,v1; return-object v0.
+  bytes.set([0, 0, 1, 1, 0, 9, 0x90, 3, 1, 0x81, 2, 0], 216);
+  view.setUint16(400, 2, true); view.setUint16(402, 1, true); view.setUint16(404, 2, true);
+  view.setUint32(412, instructions.length, true);
+  instructions.forEach((word, index) => view.setUint16(416 + index * 2, word, true));
   return bytes;
 }
