@@ -2,6 +2,7 @@ import type { ExecutionResult, RuntimeAdapter } from "./adapter.ts";
 import { loadElf } from "./elf.ts";
 import type { ElfImage, LoadedElf } from "./elf.ts";
 import { NativeImports } from "./symbols.ts";
+import type { NativeSettlement, NativeWait } from "./symbols.ts";
 
 export type NativeCallProbe = {
   status: "blocked-import" | "blocked-interrupt" | "fault" | "budget" | "returned";
@@ -25,6 +26,17 @@ export type InitializationProbe = Omit<NativeCallProbe, "status"> & {
 const stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
 const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
 const maximumSlices = 400, instructionsPerSlice = 500;
+type ExecutionProbe = NativeCallProbe & { completedCalls: number };
+type ResumeValue = NativeSettlement | "timeout" | undefined;
+
+async function waitForNative(wait: NativeWait, milliseconds: number): Promise<ResumeValue> {
+  if (milliseconds <= 0) { void wait.ready.catch(() => {}); return "timeout"; }
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve("timeout"), milliseconds);
+    wait.ready.then(value => { clearTimeout(timer); resolve({ ok: true, value }); },
+      error => { clearTimeout(timer); resolve({ ok: false, error }); });
+  });
+}
 
 export class NativeSession {
   readonly imports: NativeImports;
@@ -84,13 +96,26 @@ export class NativeSession {
   }
 
   initialize(loaded: LoadedElf): InitializationProbe {
+    this.checkInitialization(loaded);
+    return this.finishInitialization(loaded, this.execute(loaded.initializers));
+  }
+
+  async initializeAsync(loaded: LoadedElf): Promise<InitializationProbe> {
+    this.checkInitialization(loaded);
+    return this.finishInitialization(loaded, await this.executeAsync(loaded.initializers));
+  }
+
+  private checkInitialization(loaded: LoadedElf): void {
     this.assertActive();
     if (![...this.libraries.values()].includes(loaded) || this.initialized.has(loaded)) throw new Error("Library is foreign or already initialized");
     for (const name of loaded.image.needed) {
       const dependency = this.libraries.get(name);
       if (dependency && !this.initialized.has(dependency)) throw new Error(`Dependency ${name} is not initialized`);
     }
-    const { completedCalls, ...result } = this.execute(loaded.initializers);
+  }
+
+  private finishInitialization(loaded: LoadedElf, probe: ExecutionProbe): InitializationProbe {
+    const { completedCalls, ...result } = probe;
     if (result.status === "returned") this.initialized.add(loaded);
     return { ...result, status: result.status === "returned" ? "initializers-returned" : result.status,
       completedInitializers: completedCalls, initializerCount: loaded.initializers.length,
@@ -98,15 +123,51 @@ export class NativeSession {
   }
 
   call(address: bigint, args: readonly bigint[]): NativeCallProbe {
-    this.assertActive();
-    if (args.length > 8) throw new RangeError("Native call exceeds integer argument registers");
-    // shortcut: integer register arguments only; extend for an observed FP or aggregate caller.
-    for (let index = 0; index < args.length; index++) this.cpu.writeRegister(`x${index}`, args[index]!);
+    this.prepareCall(args);
     const { completedCalls: _completed, ...result } = this.execute([address]);
     return result;
   }
 
-  private execute(addresses: readonly bigint[]): NativeCallProbe & { completedCalls: number } {
+  async callAsync(address: bigint, args: readonly bigint[]): Promise<NativeCallProbe> {
+    this.prepareCall(args);
+    const { completedCalls: _completed, ...result } = await this.executeAsync([address]);
+    return result;
+  }
+
+  private prepareCall(args: readonly bigint[]): void {
+    this.assertActive();
+    if (args.length > 8) throw new RangeError("Native call exceeds integer argument registers");
+    // shortcut: integer register arguments only; extend for an observed FP or aggregate caller.
+    for (let index = 0; index < args.length; index++) this.cpu.writeRegister(`x${index}`, args[index]!);
+  }
+
+  private execute(addresses: readonly bigint[]): ExecutionProbe {
+    const execution = this.execution(addresses);
+    let step = execution.next();
+    while (!step.done) {
+      if (step.value) {
+        void step.value.ready.catch(() => {});
+        throw new Error("Asynchronous native handler requires an asynchronous session call");
+      }
+      step = execution.next(undefined);
+    }
+    return step.value;
+  }
+
+  private async executeAsync(addresses: readonly bigint[]): Promise<ExecutionProbe> {
+    const execution = this.execution(addresses), started = performance.now();
+    let yielded = started, step = execution.next();
+    while (!step.done) {
+      const resumed = step.value ? await waitForNative(step.value, 3000 - (performance.now() - started)) : undefined;
+      if (performance.now() - yielded >= 8) {
+        await new Promise(resolve => setTimeout(resolve, 0)); yielded = performance.now();
+      }
+      step = execution.next(resumed);
+    }
+    return step.value;
+  }
+
+  private *execution(addresses: readonly bigint[]): Generator<NativeWait | undefined, ExecutionProbe, ResumeValue> {
     this.assertActive();
     const cpu = this.cpu, imports = this.imports, started = performance.now();
     for (const address of addresses) {
@@ -128,15 +189,29 @@ export class NativeSession {
       cpu.writeRegister("x30", sentinel);
       let pc = initializer;
       while (sliceCount < maximumSlices && performance.now() - started < 3000) {
+        if (this.disposed) throw new Error("Native session is disposed");
         sliceCount++;
         last = cpu.run(pc, sentinel, instructionsPerSlice);
         pc = last.pc;
-        if (last.reason === "interrupt" && imports.handleInterrupt(last.pc)) {
-          pc = cpu.readRegister("pc");
-          last = { reason: "budget", pc, elapsedMs: last.elapsedMs };
-          continue;
+        if (last.reason === "interrupt") {
+          let handled = imports.handleInterrupt(last.pc);
+          while (typeof handled !== "boolean") {
+            const waitingStack = cpu.readRegister("sp"), waitingThread = cpu.readRegister("tpidr_el0");
+            const settled = yield handled;
+            if (settled === "timeout") { last = { ...last, reason: "budget" }; break; }
+            if (this.disposed) throw new Error("Native session is disposed");
+            if (cpu.readRegister("sp") !== waitingStack || cpu.readRegister("tpidr_el0") !== waitingThread) throw new Error("Native wait state changed");
+            if (!settled) throw new Error("Native wait resumed without a result");
+            handled = imports.resumeWait(handled, settled);
+          }
+          if (last.reason === "budget") break;
+          if (handled === true) {
+            pc = cpu.readRegister("pc");
+            last = { reason: "budget", pc, elapsedMs: last.elapsedMs };
+            yield undefined; continue;
+          }
         }
-        if (last.reason === "budget") continue;
+        if (last.reason === "budget") { yield undefined; continue; }
         break;
       }
       if (last.reason === "interrupt") {

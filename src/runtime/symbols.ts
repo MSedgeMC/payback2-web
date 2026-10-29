@@ -5,7 +5,14 @@ import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts"
 import { GuestHeap } from "./heap.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
-export type NativeDispatch = void | boolean | {
+export type NativeSettlement = { ok: true; value: unknown } | { ok: false; error: unknown };
+export type NativeWait = {
+  kind: "wait";
+  ready: Promise<unknown>;
+  onReady: (value: unknown) => NativeDispatch;
+  onError?: (error: unknown) => NativeDispatch;
+};
+export type NativeDispatch = void | boolean | NativeWait | {
   kind: "call";
   address: bigint;
   args: readonly bigint[];
@@ -31,6 +38,7 @@ export class NativeImports {
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
   private readonly handlers = new Map<bigint, () => NativeDispatch>();
+  private disposed = false;
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
@@ -82,7 +90,7 @@ export class NativeImports {
     return this.entries.find(entry => entry.kind === "function" && entry.address + 4n === pc);
   }
 
-  handleInterrupt(pc: bigint): boolean {
+  handleInterrupt(pc: bigint): boolean | NativeWait {
     const entry = this.atInterrupt(pc), symbol = entry?.symbol;
     const handler = entry && this.handlers.get(entry.address);
     if (handler) return this.dispatch(handler());
@@ -210,9 +218,20 @@ export class NativeImports {
     if (this.callbackFrames.length >= 32) throw new RangeError("Native callback nesting limit exceeded");
   }
 
-  private dispatch(result: NativeDispatch): boolean {
+  resumeWait(wait: NativeWait, settled: NativeSettlement): boolean | NativeWait {
+    if (this.disposed) throw new Error("Native imports are disposed");
+    if (settled.ok) return this.dispatch(wait.onReady(settled.value));
+    if (!wait.onError) throw settled.error;
+    return this.dispatch(wait.onError(settled.error));
+  }
+
+  private dispatch(result: NativeDispatch): boolean | NativeWait {
     if (result === false) return false;
     if (result !== undefined && result !== true) {
+      if (result.kind === "wait") {
+        if (!(result.ready instanceof Promise) || typeof result.onReady !== "function") throw new TypeError("Invalid native wait");
+        return result;
+      }
       if (result.kind !== "call") throw new TypeError("Invalid native handler result");
       this.validateCallback(result.address, result.args);
       this.callbackReturnAddress ??= this.resolve({ name: "native:return", type: 2, binding: 1, visibility: 0,
@@ -226,6 +245,7 @@ export class NativeImports {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.destructors.length = 0;
     this.callbackFrames.length = 0;
     this.threadKeys.clear();

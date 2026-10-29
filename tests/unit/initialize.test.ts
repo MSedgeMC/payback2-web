@@ -175,7 +175,9 @@ test("memcpy copies only the requested bytes, returns its destination, and rejec
     cpu.copyIn(destination, new Uint8Array([9, 9, 9, 9, 9]));
     const copy = (to: bigint, from: bigint, size: bigint): boolean => {
       cpu.writeRegister("x0", to); cpu.writeRegister("x1", from); cpu.writeRegister("x2", size); cpu.writeRegister("x30", end);
-      return imports.handleInterrupt(cpu.run(address, end, 20).pc);
+      const handled = imports.handleInterrupt(cpu.run(address, end, 20).pc);
+      assert.equal(typeof handled, "boolean");
+      return handled === true;
     };
     cpu.writeRegister("x19", 77n);
     assert.equal(copy(destination + 1n, source, 3n), true);

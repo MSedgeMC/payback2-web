@@ -17,7 +17,9 @@ test("normal native mutexes preserve their object and block repeated or unsuppor
     cpu.copyIn(data, object); cpu.writeRegister("x19", 123n);
     const call = (address: bigint, mutex = data): boolean => {
       cpu.writeRegister("x0", mutex); cpu.writeRegister("x30", end);
-      return imports.handleInterrupt(cpu.run(address, end, 20).pc);
+      const handled = imports.handleInterrupt(cpu.run(address, end, 20).pc);
+      assert.equal(typeof handled, "boolean");
+      return handled === true;
     };
     assert.equal(call(lock), true); assert.equal(cpu.readRegister("x0"), 0n);
     const locked = object.slice(); locked[0] = 1;
