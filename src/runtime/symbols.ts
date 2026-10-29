@@ -132,7 +132,7 @@ export class NativeImports {
       if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_BYTES) throw new RangeError("Native fill exceeds its byte limit");
       const value = Number(this.cpu.readRegister("x1") & 255n);
       writeGuestBytes(this.cpu, this.cpu.readRegister("x0"), new Uint8Array(size).fill(value));
-    } else if (symbol.name === "memcpy") {
+    } else if (symbol.name === "memcpy" || symbol.name === "memmove") {
       const destination = this.cpu.readRegister("x0");
       const bytes = readGuestBytes(this.cpu, this.cpu.readRegister("x1"), Number(this.cpu.readRegister("x2")));
       writeGuestBytes(this.cpu, destination, bytes);

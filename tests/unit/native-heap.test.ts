@@ -55,3 +55,22 @@ test("native memset uses the low byte, preserves surrounding memory, and validat
     assert.deepEqual(cpu.copyOut(data, 5), new Uint8Array([9, 255, 255, 255, 9]));
   } finally { imports.dispose(); cpu.close(); }
 });
+
+test("native memmove snapshots overlapping transfers in both directions", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu), data = 0x40000n, end = 0x7fff0000n;
+  try {
+    cpu.map(data, 4096n, 3);
+    const address = imports.resolve({ ...parseElf(syntheticElf()).symbols[1]!, name: "memmove", version: { name: "LIBC", library: "libc.so" } });
+    const move = (destination: bigint, source: bigint, size: bigint): void => {
+      cpu.writeRegister("x0", destination); cpu.writeRegister("x1", source); cpu.writeRegister("x2", size); cpu.writeRegister("x30", end);
+      assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+      assert.equal(cpu.readRegister("x0"), destination);
+    };
+    cpu.copyIn(data, new Uint8Array([0, 1, 2, 3, 4, 5])); move(data + 1n, data, 5n);
+    assert.deepEqual(cpu.copyOut(data, 6), new Uint8Array([0, 0, 1, 2, 3, 4]));
+    cpu.copyIn(data, new Uint8Array([0, 1, 2, 3, 4, 5])); move(data, data + 1n, 5n);
+    assert.deepEqual(cpu.copyOut(data, 6), new Uint8Array([1, 2, 3, 4, 5, 5]));
+    move(0n, 0n, 0n);
+    assert.throws(() => move(data, data + 4096n, 1n), /readable/);
+  } finally { imports.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
