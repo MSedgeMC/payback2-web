@@ -20,6 +20,11 @@ test("registered native handlers execute at traps, preserve the caller, and expo
     const result = cpu.run(failing, end, 20);
     assert.throws(() => imports.handleInterrupt(result.pc), /handler failed/);
     assert.equal(cpu.readRegister("pc"), result.pc);
+    const declined = imports.bind({ ...symbol, name: "unsupported_argument" }, () => false);
+    cpu.writeRegister("x0", 456n);
+    const blocked = cpu.run(declined, end, 20);
+    assert.equal(imports.handleInterrupt(blocked.pc), false);
+    assert.equal(cpu.readRegister("pc"), blocked.pc); assert.equal(cpu.readRegister("x0"), 456n);
   } finally { imports.dispose(); cpu.close(); }
 });
 

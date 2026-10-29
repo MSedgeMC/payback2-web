@@ -23,7 +23,7 @@ export class NativeImports {
   private readonly onceFrames: { control: bigint; returnAddress: bigint; stackPointer: bigint }[] = [];
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
-  private readonly handlers = new Map<bigint, () => void>();
+  private readonly handlers = new Map<bigint, () => void | boolean>();
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
@@ -64,7 +64,7 @@ export class NativeImports {
     return entry.address;
   };
 
-  bind(symbol: ElfSymbol, handler: () => void): bigint {
+  bind(symbol: ElfSymbol, handler: () => void | boolean): bigint {
     if (symbol.type !== 2) throw new TypeError("Only native functions can have handlers");
     const address = this.resolve(symbol);
     if (this.handlers.has(address)) throw new Error("Native function already has a handler");
@@ -79,7 +79,8 @@ export class NativeImports {
     const entry = this.atInterrupt(pc), symbol = entry?.symbol;
     const handler = entry && this.handlers.get(entry.address);
     if (handler) {
-      handler(); this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
+      if (handler() === false) return false;
+      this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
       return true;
     }
     if (entry && entry.address === this.onceReturnAddress) {
