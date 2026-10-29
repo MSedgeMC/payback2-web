@@ -1,13 +1,13 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
 import type { JavaClass } from "./dex.ts";
-import { readCString, writeGuestBytes } from "./guest-memory.ts";
+import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import type { NativeImports } from "./symbols.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -54,6 +54,7 @@ export class JniEnvironment {
   private readonly references = new Map<bigint, { name: string; global: boolean }>();
   private readonly methods = new Map<bigint, JavaMethod>();
   private readonly classes = new Map<string, JavaClass>();
+  private readonly nativeMethods = new Map<string, bigint>();
   private readonly fields = new Map<bigint, { className: string; name: string; value: bigint | string }>();
   private nextReference = 0x73000000n;
   private mapped = false;
@@ -83,6 +84,7 @@ export class JniEnvironment {
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
         144: () => this.getStaticField(),
+        215: () => this.registerNatives(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
@@ -167,6 +169,35 @@ export class JniEnvironment {
     return reference;
   }
 
+  lookupNative(className: string, name: string, descriptor: string): bigint | undefined {
+    return this.nativeMethods.get(`${className}\0${name}\0${descriptor}`);
+  }
+
+  private registerNatives(): boolean {
+    this.assertEnvironment();
+    const entry = this.references.get(this.cpu.readRegister("x1"));
+    if (!entry) throw new RangeError("Invalid JNI class reference");
+    const count = Number(BigInt.asIntN(32, this.cpu.readRegister("x3"))), table = this.cpu.readRegister("x2");
+    if (count < 0 || count > 256) throw new RangeError("JNI native registration count exceeds its limit");
+    if (count && table % 8n) throw new RangeError("JNI native registration table is not aligned");
+    const bytes = readGuestBytes(this.cpu, table, count * 24), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const string = (offset: number): string => new TextDecoder("utf-8", { fatal: true }).decode(readCString(this.cpu, view.getBigUint64(offset, true), 256));
+    const pending = new Map<string, bigint>();
+    for (let index = 0; index < count; index++) {
+      const offset = index * 24, name = string(offset), descriptor = string(offset + 8), address = view.getBigUint64(offset + 16, true);
+      const declarations = this.classes.get(entry.name)?.methods.filter(method => method.name === name && method.descriptor === descriptor);
+      if (declarations?.length !== 1 || !declarations[0]!.isNative) return false;
+      if (address % 4n || !this.cpu.regions.some(region => (region.permissions & 4) && address >= region.address && address + 4n <= region.address + region.size)) {
+        throw new RangeError("JNI native method is outside executable guest memory");
+      }
+      pending.set(`${entry.name}\0${name}\0${descriptor}`, address);
+    }
+    const additions = [...pending.keys()].filter(key => !this.nativeMethods.has(key)).length;
+    if (this.nativeMethods.size + additions > 256) throw new RangeError("JNI native method limit exceeded");
+    for (const [key, address] of pending) this.nativeMethods.set(key, address);
+    this.cpu.writeRegister("x0", 0n); return true;
+  }
+
   private retainGlobalReference(): void {
     this.assertEnvironment();
     const reference = this.cpu.readRegister("x1");
@@ -207,6 +238,7 @@ export class JniEnvironment {
     this.references.clear();
     this.methods.clear();
     this.classes.clear();
+    this.nativeMethods.clear();
     this.fields.clear();
     if (this.mapped) this.cpu.unmap(this.vmAddress, 4096n);
   }
