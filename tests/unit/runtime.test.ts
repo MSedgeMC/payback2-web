@@ -47,6 +47,22 @@ test("AArch64 floating point arithmetic and conversion preserve register lanes",
   } finally { cpu.close(); }
 });
 
+test("indirect AArch64 calls return to their caller and preserve saved registers", async () => {
+  const cpu = await createRuntime();
+  try {
+    cpu.map(BASE, 4096n, 5);
+    cpu.copyIn(BASE, words(
+      0xaa1e03f3, 0xd63f0280, 0x91000400, 0xaa1303fe, 0xd65f03c0,
+      0xd503201f, 0xd2800520, 0xd65f03c0,
+    )); // Save LR; call x20; increment result; restore LR; return. Callee returns 41.
+    cpu.writeRegister("x20", BASE + 24n); cpu.writeRegister("x30", END);
+    assert.equal(cpu.run(BASE, END, 20).reason, "end");
+    assert.equal(cpu.readRegister("x0"), 42n);
+    assert.equal(cpu.readRegister("x19"), END);
+    assert.equal(cpu.readRegister("x20"), BASE + 24n);
+  } finally { cpu.close(); }
+});
+
 test("an infinite guest branch stops at the instruction budget", async () => {
   const cpu = await createRuntime();
   try {
