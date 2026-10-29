@@ -9,7 +9,7 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 174: "SetObjectArrayElement", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 174: "SetObjectArrayElement", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string }
   | { kind: "object-array"; elements: (JavaValue | null)[] } | { kind: "boxed-long"; value: bigint };
