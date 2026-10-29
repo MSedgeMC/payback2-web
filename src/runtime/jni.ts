@@ -13,6 +13,7 @@ type JavaMethod = { className: string; name: string; descriptor: string; isStati
 type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
+  "java/lang/Object": [],
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
   "java/lang/Double": ["<init>(D)V", "doubleValue()D"],
   "java/lang/Long": ["<init>(J)V", "longValue()J"],
