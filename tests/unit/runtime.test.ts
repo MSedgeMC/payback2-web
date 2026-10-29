@@ -109,6 +109,20 @@ test("rewriting executable memory invalidates translated instructions", async ()
   } finally { cpu.close(); }
 });
 
+test("code loaded after execution and reused mapping addresses contain fresh instructions", async () => {
+  const cpu = await createRuntime(), end = 0x7fff0000n;
+  try {
+    for (const [address, value] of [[0x10000n, 1], [0x20000n, 2], [0x20000n, 3]] as const) {
+      cpu.map(address, 4096n, 5);
+      cpu.copyIn(address, words(0xd2800000 | (value << 5), 0xd65f03c0));
+      cpu.writeRegister("x30", end);
+      assert.equal(cpu.run(address, end, 20).reason, "end");
+      assert.equal(cpu.readRegister("x0"), BigInt(value));
+      cpu.unmap(address, 4096n);
+    }
+  } finally { cpu.close(); }
+});
+
 test("SVC stops before a host implementation runs and records the next PC", async () => {
   const cpu = await createRuntime();
   try {

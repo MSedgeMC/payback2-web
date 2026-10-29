@@ -27,7 +27,7 @@ class UnicornRuntime implements RuntimeAdapter {
   private interrupt: number | undefined;
   private memoryFault: string | undefined;
   private running = false;
-  private hasExecuted = false;
+  private readonly translatedRegions = new Set<Region>();
 
   constructor(module: UnicornModule) {
     this.module = module;
@@ -79,6 +79,7 @@ class UnicornRuntime implements RuntimeAdapter {
     const index = this.regions.findIndex(r => r.address === address && r.size === size);
     if (index < 0) throw new RangeError("Unmap requires an exact owned mapping");
     this.engine.mem_unmap(address, size);
+    this.translatedRegions.delete(this.regions[index]!);
     this.regions.splice(index, 1);
   }
 
@@ -108,19 +109,17 @@ class UnicornRuntime implements RuntimeAdapter {
     if (this.running) throw new Error("Guest memory cannot be replaced during execution");
     if (bytes.byteLength) {
       this.engine.mem_write(address, bytes);
-      if (this.hasExecuted) {
-        const region = this.regions.find(r => !!(r.permissions & 4) && address >= r.address && address < r.address + r.size);
-        if (region) {
-          // This pinned build lacks uc_ctl. Remapping only the affected
-          // pages invalidates translations while retaining their bytes/rights.
-          // The loading path runs before any translations exist and skips it.
-          const last = address + BigInt(bytes.byteLength);
-          for (let page = address / 4096n * 4096n; page < last; page += 4096n) {
-            const contents = this.engine.mem_read(page, 4096);
-            this.engine.mem_unmap(page, 4096n);
-            this.engine.mem_map(page, 4096n, region.permissions);
-            this.engine.mem_write(page, contents);
-          }
+      const region = this.regions.find(r => !!(r.permissions & 4) && address >= r.address && address < r.address + r.size);
+      if (region && this.translatedRegions.has(region)) {
+        // This pinned build lacks uc_ctl. Remapping only the affected
+        // pages invalidates translations while retaining their bytes/rights.
+        // New mappings have no translations, including libraries loaded later.
+        const last = address + BigInt(bytes.byteLength);
+        for (let page = address / 4096n * 4096n; page < last; page += 4096n) {
+          const contents = this.engine.mem_read(page, 4096);
+          this.engine.mem_unmap(page, 4096n);
+          this.engine.mem_map(page, 4096n, region.permissions);
+          this.engine.mem_write(page, contents);
         }
       }
     }
@@ -168,7 +167,7 @@ class UnicornRuntime implements RuntimeAdapter {
     }
     if (this.running) throw new Error("Nested guest execution is unsupported");
     this.running = true;
-    this.hasExecuted = true;
+    for (const region of this.regions) if (region.permissions & 4) this.translatedRegions.add(region);
     this.interrupt = undefined;
     this.memoryFault = undefined;
     runtimeDiagnostics.length = 0;
@@ -198,6 +197,7 @@ class UnicornRuntime implements RuntimeAdapter {
     this.engine.close();
     this.module._free(this.engine.handle_ptr);
     this.regions.length = 0;
+    this.translatedRegions.clear();
     this.closed = true;
   }
 }
