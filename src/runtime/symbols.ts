@@ -1,6 +1,6 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
-import { readCString, writeGuestBytes } from "./guest-memory.ts";
+import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
 
@@ -62,6 +62,10 @@ export class NativeImports {
       // The browser guest has an empty Android property area: missing keys return zero and an empty string.
       writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), new Uint8Array([0]));
       this.cpu.writeRegister("x0", 0n);
+    } else if (symbol.name === "memcpy") {
+      const destination = this.cpu.readRegister("x0");
+      const bytes = readGuestBytes(this.cpu, this.cpu.readRegister("x1"), Number(this.cpu.readRegister("x2")));
+      writeGuestBytes(this.cpu, destination, bytes);
     } else return false;
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;

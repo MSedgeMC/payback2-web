@@ -143,3 +143,32 @@ test("absent Android properties return an empty value and invalid guest pointers
     assert.throws(() => imports.handleInterrupt(cpu.run(address, end, 20).pc), /writable/);
   } finally { imports.dispose(); cpu.close(); }
 });
+
+test("memcpy copies only the requested bytes, returns its destination, and rejects invalid transfers", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu);
+  try {
+    const symbol = { ...parseElf(syntheticElf()).symbols[1]!, name: "memcpy",
+                     version: { name: "LIBC", library: "libc.so" } };
+    const address = imports.resolve(symbol), source = 0x20000n, destination = 0x30000n, end = 0x7fff0000n;
+    cpu.map(source, 4096n, 3); cpu.map(destination, 4096n, 3);
+    cpu.copyIn(source, new Uint8Array([1, 2, 3, 4]));
+    cpu.copyIn(destination, new Uint8Array([9, 9, 9, 9, 9]));
+    const copy = (to: bigint, from: bigint, size: bigint): boolean => {
+      cpu.writeRegister("x0", to); cpu.writeRegister("x1", from); cpu.writeRegister("x2", size); cpu.writeRegister("x30", end);
+      return imports.handleInterrupt(cpu.run(address, end, 20).pc);
+    };
+    cpu.writeRegister("x19", 77n);
+    assert.equal(copy(destination + 1n, source, 3n), true);
+    assert.deepEqual(cpu.copyOut(destination, 5), new Uint8Array([9, 1, 2, 3, 9]));
+    assert.equal(cpu.readRegister("x0"), destination + 1n);
+    assert.equal(cpu.readRegister("pc"), end);
+    assert.equal(cpu.readRegister("x19"), 77n);
+    assert.equal(copy(0n, 0n, 0n), true);
+    assert.equal(cpu.readRegister("x0"), 0n);
+    assert.throws(() => copy(destination, source + 4096n, 1n), /readable/);
+    assert.throws(() => copy(destination, source, 1024n * 1024n + 1n), /byte limit/);
+    cpu.protect(destination, 4096n, 1);
+    assert.throws(() => copy(destination, source, 1n), /writable/);
+    assert.deepEqual(cpu.copyOut(destination, 5), new Uint8Array([9, 1, 2, 3, 9]));
+  } finally { imports.dispose(); cpu.close(); }
+});
