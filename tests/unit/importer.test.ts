@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoundedZip, readPackageEngine, validateEntryName } from "../../src/assets/importer.ts";
+import { BoundedZip, readPackageEngine, readPackageLibraries, validateEntryName } from "../../src/assets/importer.ts";
+import { SUPPORTED_GAME } from "../../src/assets/baseline.ts";
 import { syntheticZip } from "../fixtures/zip.ts";
 
 test("ZIP reader lazily extracts only selected stored and deflated entries", async () => {
@@ -14,6 +15,25 @@ test("ZIP reader lazily extracts only selected stored and deflated entries", asy
     } finally { await archive.close(); }
     await assert.rejects(archive.bytes("assets/sample", data.byteLength), /closed/);
   }
+});
+
+test("package import extracts both native libraries without selecting unrelated entries", async () => {
+  const engine = new Uint8Array([1, 2, 3]), pairip = new Uint8Array([4, 5, 6]);
+  const split = syntheticZip([
+    { name: "lib/arm64-v8a/libpayback2.so", bytes: engine },
+    { name: "lib/arm64-v8a/libpairipcore.so", bytes: pairip, deflate: true },
+    { name: "assets/unused", bytes: new Uint8Array(1024), deflate: true },
+  ]);
+  const packageFile = syntheticZip([
+    { name: "info.json", bytes: new TextEncoder().encode(JSON.stringify({ pname: SUPPORTED_GAME.package,
+      release_version: SUPPORTED_GAME.version, versioncode: SUPPORTED_GAME.versionCode })) },
+    { name: "split_config.arm64_v8a.apk", bytes: new Uint8Array(await split.arrayBuffer()), deflate: true },
+  ]);
+  for (const file of [new File([split], "split.apk"), new File([packageFile], "game.apkm")]) {
+    assert.deepEqual(await readPackageLibraries(file), { engine, pairip });
+  }
+  const incomplete = syntheticZip([{ name: "lib/arm64-v8a/libpayback2.so", bytes: engine }]);
+  await assert.rejects(readPackageLibraries(new File([incomplete], "incomplete.apk")), /libpairipcore.*missing/);
 });
 
 test("unsafe names, duplicate paths, and malformed directories are rejected", async () => {

@@ -106,11 +106,11 @@ export class BoundedZip {
   async close(): Promise<void> { if (!this.closed) { this.closed = true; await this.reader.close(); } }
 }
 
-export async function readPackageEngine(file: File): Promise<Uint8Array<ArrayBuffer>> {
+export async function readPackageLibraries(file: File): Promise<{ engine: Uint8Array<ArrayBuffer>; pairip?: Uint8Array<ArrayBuffer> }> {
   const name = file.name.toLowerCase();
   if (name.endsWith(".so")) {
     if (file.size !== SUPPORTED_GAME.engineBytes) throw new Error("Unsupported engine size");
-    return new Uint8Array(await file.arrayBuffer());
+    return { engine: new Uint8Array(await file.arrayBuffer()) };
   }
   if (!name.endsWith(".apk") && !name.endsWith(".apkm")) throw new Error("Select an APKM, ARM64 split APK, or libpayback2.so");
   let apk: Blob = file;
@@ -125,6 +125,14 @@ export async function readPackageEngine(file: File): Promise<Uint8Array<ArrayBuf
     } finally { await packageZip.close(); }
   }
   const splitZip = await BoundedZip.open(apk);
-  try { return await splitZip.bytes("lib/arm64-v8a/libpayback2.so", SUPPORTED_GAME.engineBytes); }
+  try {
+    const engine = await splitZip.bytes("lib/arm64-v8a/libpayback2.so", SUPPORTED_GAME.engineBytes);
+    const pairip = await splitZip.bytes("lib/arm64-v8a/libpairipcore.so", SUPPORTED_GAME.pairipBytes);
+    return { engine, pairip };
+  }
   finally { await splitZip.close(); }
+}
+
+export async function readPackageEngine(file: File): Promise<Uint8Array<ArrayBuffer>> {
+  return (await readPackageLibraries(file)).engine;
 }
