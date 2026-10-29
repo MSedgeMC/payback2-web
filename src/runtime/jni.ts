@@ -34,7 +34,7 @@ const classMethods: Record<string, readonly string[]> = {
     "getData()Landroid/net/Uri;",
   ],
   "android/net/Uri": ["toString()Ljava/lang/String;"],
-  "android/content/Context": ["sendBroadcast(Landroid/content/Intent;)V"],
+  "android/content/Context": ["sendBroadcast(Landroid/content/Intent;)V", "startActivity(Landroid/content/Intent;)V"],
 };
 const staticMethods: Record<string, readonly string[]> = {
   "android/net/Uri": ["parse(Ljava/lang/String;)Landroid/net/Uri;"],
