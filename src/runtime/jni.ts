@@ -38,8 +38,8 @@ const classMethods: Record<string, readonly string[]> = {
 const staticMethods: Record<string, readonly string[]> = {
   "android/net/Uri": ["parse(Ljava/lang/String;)Landroid/net/Uri;"],
 };
-const staticIntFields: Record<string, Readonly<Record<string, bigint>>> = {
-  "android/content/Intent": { FLAG_ACTIVITY_NEW_TASK: 0x10000000n },
+const staticFields: Record<string, Readonly<Record<string, bigint | string>>> = {
+  "android/content/Intent": { FLAG_ACTIVITY_NEW_TASK: 0x10000000n, ACTION_VIEW: "android.intent.action.VIEW" },
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
@@ -51,7 +51,7 @@ export class JniEnvironment {
   private readonly threadPointer: bigint;
   private readonly references = new Map<bigint, { name: string; global: boolean }>();
   private readonly methods = new Map<bigint, JavaMethod>();
-  private readonly fields = new Map<bigint, { className: string; name: string; value: bigint }>();
+  private readonly fields = new Map<bigint, { className: string; name: string; value: bigint | string }>();
   private nextReference = 0x73000000n;
   private mapped = false;
   private disposed = false;
@@ -125,9 +125,9 @@ export class JniEnvironment {
     this.assertEnvironment();
     const entry = this.references.get(this.cpu.readRegister("x1"));
     if (!entry) throw new RangeError("Invalid JNI class reference");
-    const name = this.argumentString(2), descriptor = this.argumentString(3), definitions = staticIntFields[entry.name];
+    const name = this.argumentString(2), descriptor = this.argumentString(3), definitions = staticFields[entry.name];
     const value = definitions && Object.hasOwn(definitions, name) ? definitions[name] : undefined;
-    if (descriptor !== "I" || value === undefined) return false;
+    if (value === undefined || descriptor !== (typeof value === "bigint" ? "I" : "Ljava/lang/String;")) return false;
     let address = [...this.fields].find(([, field]) => field.className === entry.name && field.name === name)?.[0];
     if (address === undefined) {
       if (this.fields.size >= 256) throw new RangeError("JNI field identifier limit exceeded");

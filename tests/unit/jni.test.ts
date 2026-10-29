@@ -156,7 +156,7 @@ test("JNI static method lookup resolves Uri parsing and rejects instance lookup 
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
 
-test("JNI static integer fields have stable typed identifiers and reject the wrong descriptor", async () => {
+test("JNI static fields have stable typed identifiers and reject the wrong descriptor", async () => {
   const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
   try {
     cpu.map(data, 4096n, 3);
@@ -169,6 +169,11 @@ test("JNI static integer fields have stable typed identifiers and reject the wro
     cpu.copyIn(entry, tableCall(144)); const field = session.call(entry, args);
     assert.equal(field.status, "returned"); assert.notEqual(field.registers.x0, 0n);
     assert.equal(session.call(entry, args).registers.x0, field.registers.x0);
+    cpu.copyIn(data + 64n, new TextEncoder().encode("ACTION_VIEW\0"));
+    cpu.copyIn(data + 128n, new TextEncoder().encode("Ljava/lang/String;\0"));
+    const stringField = session.call(entry, args);
+    assert.equal(stringField.status, "returned"); assert.notEqual(stringField.registers.x0, field.registers.x0);
+    cpu.copyIn(data + 64n, new TextEncoder().encode("FLAG_ACTIVITY_NEW_TASK\0"));
     cpu.copyIn(data + 128n, new TextEncoder().encode("J\0")); const wrongType = session.call(entry, args);
     assert.equal(wrongType.status, "blocked-import"); assert.equal(wrongType.blockedSymbol, "JNI.GetStaticFieldID");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
