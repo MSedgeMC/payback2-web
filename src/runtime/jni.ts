@@ -1,5 +1,6 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
+import type { JavaClass } from "./dex.ts";
 import { readCString, writeGuestBytes } from "./guest-memory.ts";
 import type { NativeImports } from "./symbols.ts";
 
@@ -7,7 +8,7 @@ const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
 const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID" };
-type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean };
+type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Float": ["<init>(F)V", "floatValue()F"],
@@ -52,6 +53,7 @@ export class JniEnvironment {
   private readonly threadPointer: bigint;
   private readonly references = new Map<bigint, { name: string; global: boolean }>();
   private readonly methods = new Map<bigint, JavaMethod>();
+  private readonly classes = new Map<string, JavaClass>();
   private readonly fields = new Map<bigint, { className: string; name: string; value: bigint | string }>();
   private nextReference = 0x73000000n;
   private mapped = false;
@@ -93,10 +95,27 @@ export class JniEnvironment {
     } catch (error) { this.dispose(); throw error; }
   }
 
+  defineClass(definition: JavaClass): void {
+    if (this.disposed || !/^[A-Za-z_$][\w$]*(?:\/[A-Za-z_$][\w$]*)*$/.test(definition.name) || definition.name.length > 256 ||
+        Object.hasOwn(classMethods, definition.name) || this.classes.has(definition.name) || this.classes.size >= 16 || definition.methods.length > 256) {
+      throw new Error("Invalid, duplicate, or excessive Java class definition");
+    }
+    const keys = new Set<string>();
+    for (const method of definition.methods) {
+      const key = `${method.name}\0${method.descriptor}\0${method.isStatic}`;
+      if (!method.name || method.name.length > 256 || method.name.includes("(") || method.descriptor.length > 256 ||
+          !method.descriptor.startsWith("(") || typeof method.isStatic !== "boolean" || typeof method.isNative !== "boolean" || keys.has(key)) {
+        throw new Error("Invalid or duplicate Java method declaration");
+      }
+      keys.add(key);
+    }
+    this.classes.set(definition.name, { name: definition.name, methods: definition.methods.map(method => ({ ...method })) });
+  }
+
   private findClass(): boolean {
     this.assertEnvironment();
     const name = this.argumentString(1);
-    if (!Object.hasOwn(classMethods, name)) return false;
+    if (!Object.hasOwn(classMethods, name) && !this.classes.has(name)) return false;
     this.cpu.writeRegister("x0", this.addReference(name, false));
     return true;
   }
@@ -111,13 +130,15 @@ export class JniEnvironment {
     if (!entry) throw new RangeError("Invalid JNI class reference");
     const name = this.argumentString(2), descriptor = this.argumentString(3);
     const definitions = isStatic ? staticMethods : classMethods;
-    if (name.includes("(") || !descriptor.startsWith("(") || !definitions[entry.name]?.includes(name + descriptor)) return false;
+    const builtin = Object.hasOwn(definitions, entry.name) && definitions[entry.name]!.includes(name + descriptor);
+    const declared = this.classes.get(entry.name)?.methods.find(method => method.name === name && method.descriptor === descriptor && method.isStatic === isStatic);
+    if (name.includes("(") || !descriptor.startsWith("(") || !builtin && !declared) return false;
     let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name &&
       method.descriptor === descriptor && method.isStatic === isStatic)?.[0];
     if (address === undefined) {
       if (this.methods.size >= 256) throw new RangeError("JNI method identifier limit exceeded");
       address = 0x74000000n + BigInt(this.methods.size * 8);
-      this.methods.set(address, { className: entry.name, name, descriptor, isStatic });
+      this.methods.set(address, { className: entry.name, name, descriptor, isStatic, isNative: declared?.isNative ?? false });
     }
     this.cpu.writeRegister("x0", address); return true;
   }
@@ -126,7 +147,8 @@ export class JniEnvironment {
     this.assertEnvironment();
     const entry = this.references.get(this.cpu.readRegister("x1"));
     if (!entry) throw new RangeError("Invalid JNI class reference");
-    const name = this.argumentString(2), descriptor = this.argumentString(3), definitions = staticFields[entry.name];
+    const name = this.argumentString(2), descriptor = this.argumentString(3);
+    const definitions = Object.hasOwn(staticFields, entry.name) ? staticFields[entry.name] : undefined;
     const value = definitions && Object.hasOwn(definitions, name) ? definitions[name] : undefined;
     if (value === undefined || descriptor !== (typeof value === "bigint" ? "I" : "Ljava/lang/String;")) return false;
     let address = [...this.fields].find(([, field]) => field.className === entry.name && field.name === name)?.[0];
@@ -184,6 +206,7 @@ export class JniEnvironment {
     this.disposed = true;
     this.references.clear();
     this.methods.clear();
+    this.classes.clear();
     this.fields.clear();
     if (this.mapped) this.cpu.unmap(this.vmAddress, 4096n);
   }

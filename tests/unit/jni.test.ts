@@ -6,6 +6,8 @@ import { JniEnvironment } from "../../src/runtime/jni.ts";
 import { parseElf } from "../../src/runtime/elf.ts";
 import { syntheticElf } from "../fixtures/elf.ts";
 import { words } from "../fixtures/aarch64.ts";
+import { readDexClass } from "../../src/runtime/dex.ts";
+import { syntheticDex } from "../fixtures/dex.ts";
 
 const tableCall = (index: number) => words(0xf9400008, 0xf9400108 | (index << 10), 0xd61f0100);
 
@@ -176,5 +178,27 @@ test("JNI static fields have stable typed identifiers and reject the wrong descr
     cpu.copyIn(data + 64n, new TextEncoder().encode("FLAG_ACTIVITY_NEW_TASK\0"));
     cpu.copyIn(data + 128n, new TextEncoder().encode("J\0")); const wrongType = session.call(entry, args);
     assert.equal(wrongType.status, "blocked-import"); assert.equal(wrongType.blockedSymbol, "JNI.GetStaticFieldID");
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
+
+test("JNI class and method lookup use isolated DEX declarations with their actual access flags", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    const definition = readDexClass(syntheticDex(), "example/Runner"); jni.defineClass(definition);
+    assert.throws(() => jni.defineClass(definition), /duplicate/);
+    assert.throws(() => jni.defineClass({ name: "java/lang/Float", methods: [] }), /duplicate/);
+    cpu.map(data, 4096n, 3);
+    for (const [offset, value] of [[0, "example/Runner"], [64, "execute"], [128, "([B)Ljava/lang/Object;"]] as const) {
+      cpu.copyIn(data + BigInt(offset), new TextEncoder().encode(value + "\0"));
+    }
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    cpu.copyIn(entry, tableCall(6)); const reference = session.call(entry, [jni.environmentAddress, data]).registers.x0;
+    cpu.copyIn(entry, tableCall(113));
+    const args = [jni.environmentAddress, reference, data + 64n, data + 128n];
+    assert.equal(session.call(entry, args).status, "returned");
+    definition.methods[0]!.isStatic = false;
+    assert.equal(session.call(entry, args).status, "returned");
+    cpu.copyIn(entry, tableCall(33)); const wrongKind = session.call(entry, args);
+    assert.equal(wrongKind.status, "blocked-import");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
