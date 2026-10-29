@@ -44,7 +44,7 @@ def build(source_root: Path, output: Path) -> None:
     source = build_script.read_text()
     source = replace_once(source, "jobs = os.cpu_count() or 1", "jobs = min(2, os.cpu_count() or 1)")
     source = replace_once(source, "'-DCMAKE_BUILD_TYPE=Release',", "'-DCMAKE_BUILD_TYPE=Debug',")
-    source = replace_once(source, "'-Os',", "'-O1', '-g1', '-sASSERTIONS=2', '-sSTACK_OVERFLOW_CHECK=2', '-sSTACK_SIZE=1048576',")
+    source = replace_once(source, "'-Os',", "'-O1', '-g2', '-sASSERTIONS=2', '-sSTACK_OVERFLOW_CHECK=2', '-sSTACK_SIZE=1048576',")
     build_script.write_text(source)
     spec = importlib.util.spec_from_file_location("unicorn_build", build_script)
     if spec is None or spec.loader is None:
@@ -71,7 +71,7 @@ def build(source_root: Path, output: Path) -> None:
         "emscriptenVersion": lock["build"]["emscriptenVersion"], "variant": "aarch64",
         "builderSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "buildType": "Debug", "cFlags": [],
-        "linkFlags": ["-O1", "-g1", "ASSERTIONS=2", "STACK_OVERFLOW_CHECK=2", "STACK_SIZE=1048576"],
+        "linkFlags": ["-O1", "-g2", "ASSERTIONS=2", "STACK_OVERFLOW_CHECK=2", "STACK_SIZE=1048576"],
         "workers": 2, "fileSha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
         "fileBytes": runtime.stat().st_size, "purpose": "Synthetic compatibility diagnostics; not a gameplay performance build",
     }
