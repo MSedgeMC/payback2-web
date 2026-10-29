@@ -1,6 +1,15 @@
 import { MAX_TRANSFER_BYTES, validateRange } from "./adapter.ts";
 import type { RuntimeAdapter } from "./adapter.ts";
 
+export function readGuestBytes(cpu: RuntimeAdapter, address: bigint, size: number): Uint8Array {
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_BYTES) throw new RangeError("Invalid guest read byte limit");
+  validateRange(address, BigInt(size));
+  if (!size) return new Uint8Array();
+  const region = cpu.regions.find(r => address >= r.address && address + BigInt(size) <= r.address + r.size);
+  if (!region || !(region.permissions & 1)) throw new RangeError("Guest read is outside a readable mapping");
+  return cpu.copyOut(address, size);
+}
+
 export function readCString(cpu: RuntimeAdapter, address: bigint, maxBytes: number): Uint8Array {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_TRANSFER_BYTES) {
     throw new RangeError("Invalid guest string byte limit");
