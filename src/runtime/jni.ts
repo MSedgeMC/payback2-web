@@ -23,6 +23,7 @@ const classMethods: Record<string, readonly string[]> = {
     "putExtra(Ljava/lang/String;I)Landroid/content/Intent;",
     "putExtra(Ljava/lang/String;Ljava/lang/CharSequence;)Landroid/content/Intent;",
     "putExtra(Ljava/lang/String;[B)Landroid/content/Intent;",
+    "hasExtra(Ljava/lang/String;)Z",
   ],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
