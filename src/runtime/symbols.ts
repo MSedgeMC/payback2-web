@@ -9,6 +9,7 @@ export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function
 export class NativeImports {
   readonly entries: NativeImport[] = [];
   readonly destructors: { callback: bigint; argument: bigint; dso: bigint }[] = [];
+  readonly threadKeys = new Map<number, { destructor: bigint; value: bigint }>();
   private readonly cpu: RuntimeAdapter;
   private readonly codeBase: bigint;
   private readonly dataBase: bigint;
@@ -112,6 +113,29 @@ export class NativeImports {
         this.cpu.writeRegister("x30", this.onceReturnAddress); this.cpu.writeRegister("pc", callback);
         return true;
       } else return false; // shortcut: an in-progress once call blocks; add wakeups with guest scheduling.
+    } else if (symbol.name === "pthread_key_create") {
+      const destination = this.cpu.readRegister("x0"), destructor = this.cpu.readRegister("x1");
+      if (destructor !== 0n && (destructor % 4n || !this.cpu.regions.some(r => (r.permissions & 4) &&
+          destructor >= r.address && destructor + 4n <= r.address + r.size))) throw new RangeError("Thread destructor is outside executable guest memory");
+      // shortcut: one guest thread with 128 keys; move values per thread when scheduling is added.
+      let key = 0;
+      while (key < 128 && this.threadKeys.has(key)) key++;
+      if (key === 128) this.cpu.writeRegister("x0", 11n); // EAGAIN
+      else {
+        const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, key, true);
+        writeGuestBytes(this.cpu, destination, bytes);
+        this.threadKeys.set(key, { destructor, value: 0n }); this.cpu.writeRegister("x0", 0n);
+      }
+    } else if (["pthread_getspecific", "pthread_setspecific", "pthread_key_delete"].includes(symbol.name)) {
+      const key = Number(BigInt.asUintN(32, this.cpu.readRegister("x0"))), entry = this.threadKeys.get(key);
+      if (symbol.name === "pthread_getspecific") this.cpu.writeRegister("x0", entry?.value ?? 0n);
+      else {
+        if (entry) {
+          if (symbol.name === "pthread_setspecific") entry.value = this.cpu.readRegister("x1");
+          else this.threadKeys.delete(key);
+        }
+        this.cpu.writeRegister("x0", entry ? 0n : 22n); // EINVAL
+      }
     } else if (symbol.name === "__cxa_atexit") {
       if (this.destructors.length >= 256) this.cpu.writeRegister("x0", -1n);
       else {
@@ -130,6 +154,7 @@ export class NativeImports {
   dispose(): void {
     this.destructors.length = 0;
     this.onceFrames.length = 0;
+    this.threadKeys.clear();
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }
 }

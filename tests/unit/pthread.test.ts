@@ -88,3 +88,31 @@ test("blocked callbacks and invalid callback stacks leave once initialization in
     } finally { imports.dispose(); cpu.close(); }
   }
 });
+
+test("native thread keys retain destructors and full-width values and bound allocation", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu), data = 0x20000n, callback = 0x30000n, end = 0x7fff0000n;
+  try {
+    const symbol = { ...parseElf(syntheticElf()).symbols[1]!, version: { name: "LIBC", library: "libc.so" } };
+    const create = imports.resolve({ ...symbol, name: "pthread_key_create" });
+    const get = imports.resolve({ ...symbol, name: "pthread_getspecific" });
+    const set = imports.resolve({ ...symbol, name: "pthread_setspecific" });
+    const remove = imports.resolve({ ...symbol, name: "pthread_key_delete" });
+    cpu.map(data, 4096n, 3); cpu.map(callback, 4096n, 5); cpu.copyIn(callback, words(0xd65f03c0));
+    const call = (address: bigint, first: bigint, second = 0n): bigint => {
+      cpu.writeRegister("x0", first); cpu.writeRegister("x1", second); cpu.writeRegister("x30", end);
+      assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+      return cpu.readRegister("x0");
+    };
+    assert.throws(() => call(create, data, data), /executable/); assert.equal(imports.threadKeys.size, 0);
+    assert.equal(call(create, data, callback), 0n);
+    const key = new DataView(cpu.copyOut(data, 4).buffer).getUint32(0, true);
+    assert.equal(call(get, BigInt(key)), 0n);
+    assert.deepEqual(imports.threadKeys.get(key), { destructor: callback, value: 0n });
+    const value = 0xfedcba9876543210n;
+    assert.equal(call(set, BigInt(key), value), 0n); assert.equal(call(get, BigInt(key)), value);
+    assert.equal(call(remove, BigInt(key)), 0n); assert.equal(call(get, BigInt(key)), 0n);
+    assert.equal(call(set, BigInt(key), value), 22n); assert.equal(call(remove, BigInt(key)), 22n);
+    for (let index = 0; index < 128; index++) assert.equal(call(create, data), 0n);
+    assert.equal(imports.threadKeys.size, 128); assert.equal(call(create, data), 11n);
+  } finally { imports.dispose(); assert.equal(imports.threadKeys.size, 0); cpu.close(); }
+});
