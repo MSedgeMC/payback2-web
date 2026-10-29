@@ -112,6 +112,11 @@ test("JNI method lookup returns stable Float constructor identifiers and blocks 
     const method = session.call(entry, [jni.environmentAddress, local, data + 64n, data + 128n]);
     assert.equal(method.status, "returned"); assert.notEqual(method.registers.x0, 0n);
     assert.equal(session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]).registers.x0, method.registers.x0);
+    cpu.copyIn(data + 64n, new TextEncoder().encode("floatValue\0"));
+    cpu.copyIn(data + 128n, new TextEncoder().encode("()F\0"));
+    const accessor = session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]);
+    assert.equal(accessor.status, "returned"); assert.notEqual(accessor.registers.x0, method.registers.x0);
+    cpu.copyIn(data + 64n, new TextEncoder().encode("<init>\0"));
     cpu.copyIn(data + 128n, new TextEncoder().encode("(I)V\0"));
     const unknown = session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]);
     assert.equal(unknown.status, "blocked-import"); assert.equal(unknown.blockedSymbol, "JNI.GetMethodID");
