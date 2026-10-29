@@ -8,9 +8,10 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
-type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string };
+type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string }
+  | { kind: "object-array"; elements: (JavaValue | null)[] };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
   "java/lang/Object": [],
@@ -60,6 +61,7 @@ export class JniEnvironment {
   private readonly nativeMethods = new Map<string, bigint>();
   private readonly fields = new Map<bigint, { className: string; name: string; value: bigint | string }>();
   private nextReference = 0x73000000n;
+  private allocatedValueBytes = 0;
   private mapped = false;
   private disposed = false;
 
@@ -88,6 +90,7 @@ export class JniEnvironment {
         113: () => this.getMethod(true),
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
+        172: () => this.newObjectArray(),
         215: () => this.registerNatives(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
@@ -182,7 +185,28 @@ export class JniEnvironment {
     const pointer = this.cpu.readRegister("x1");
     if (pointer === 0n) { this.cpu.writeRegister("x0", 0n); return; }
     const value = decodeModifiedUtf8(readCString(this.cpu, pointer, MAX_MODIFIED_UTF8_BYTES));
-    this.cpu.writeRegister("x0", this.addReference({ kind: "string", value }, false));
+    this.cpu.writeRegister("x0", this.allocateReference({ kind: "string", value }, 64 + value.length * 2));
+  }
+
+  private allocateReference(value: JavaValue, bytes: number): bigint {
+    // shortcut: cumulative 16 MiB startup value budget; reclaim accounting with guest garbage collection.
+    if (this.allocatedValueBytes + bytes > 16 * 1024 * 1024) throw new RangeError("JNI value allocation budget exceeded");
+    const reference = this.addReference(value, false); this.allocatedValueBytes += bytes;
+    return reference;
+  }
+
+  private newObjectArray(): boolean {
+    this.assertEnvironment();
+    const length = Number(BigInt.asIntN(32, this.cpu.readRegister("x1")));
+    if (length < 0 || length > 16384) throw new RangeError("JNI object array length exceeds its limit");
+    const elementClass = this.classReference(this.cpu.readRegister("x2"));
+    // shortcut: Object arrays only; add assignability when an observed caller needs a typed array.
+    if (elementClass.name !== "java/lang/Object") return false;
+    const initialHandle = this.cpu.readRegister("x3"), initial = initialHandle === 0n ? null : this.references.get(initialHandle);
+    if (initial === undefined) throw new RangeError("Invalid JNI initial element reference");
+    const elements = new Array<JavaValue | null>(length).fill(initial);
+    this.cpu.writeRegister("x0", this.allocateReference({ kind: "object-array", elements }, 64 + length * 8));
+    return true;
   }
 
   lookupNative(className: string, name: string, descriptor: string): bigint | undefined {
