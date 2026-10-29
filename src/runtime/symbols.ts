@@ -1,6 +1,7 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
+import { GuestHeap } from "./heap.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
 
@@ -19,10 +20,17 @@ export class NativeImports {
   private dataCount = 0;
   private onceReturnAddress: bigint | undefined;
   private readonly onceFrames: { control: bigint; returnAddress: bigint; stackPointer: bigint }[] = [];
+  private readonly errnoAddress: bigint;
+  private heap: GuestHeap | undefined;
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
     this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
-    cpu.map(codeBase, 4096n, 5); this.mappings.push({ address: codeBase, size: 4096n });
+    this.errnoAddress = dataBase + 32n * 4096n;
+    try {
+      cpu.map(codeBase, 4096n, 5); this.mappings.push({ address: codeBase, size: 4096n });
+      cpu.map(this.errnoAddress, 4096n, 3); this.mappings.push({ address: this.errnoAddress, size: 4096n });
+      cpu.copyIn(this.errnoAddress, new Uint8Array(4));
+    } catch (error) { this.dispose(); throw error; }
   }
 
   resolve = (symbol: ElfSymbol): bigint => {
@@ -67,7 +75,23 @@ export class NativeImports {
       return true;
     }
     if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
-    if (symbol.name === "getpid") {
+    if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
+    else if (symbol.name === "malloc" || symbol.name === "calloc") {
+      this.heap ??= new GuestHeap(this.cpu);
+      const size = this.cpu.readRegister("x0") * (symbol.name === "calloc" ? this.cpu.readRegister("x1") : 1n);
+      const address = this.heap.allocate(size, symbol.name === "calloc");
+      this.cpu.writeRegister("x0", address);
+      if (address === 0n) {
+        const bytes = new Uint8Array(4); new DataView(bytes.buffer).setInt32(0, 12, true); // ENOMEM
+        writeGuestBytes(this.cpu, this.errnoAddress, bytes);
+      }
+    } else if (symbol.name === "free") {
+      const address = this.cpu.readRegister("x0");
+      if (address !== 0n) {
+        if (!this.heap) throw new RangeError("Free requires an active guest allocation");
+        this.heap.free(address);
+      }
+    } else if (symbol.name === "getpid") {
       // Each isolated worker hosts one guest process in its own PID namespace.
       this.cpu.writeRegister("x0", 1n);
     } else if (symbol.name === "getauxval") {
@@ -155,6 +179,7 @@ export class NativeImports {
     this.destructors.length = 0;
     this.onceFrames.length = 0;
     this.threadKeys.clear();
+    this.heap?.dispose();
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }
 }
