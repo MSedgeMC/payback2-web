@@ -29,6 +29,9 @@ test("guest JavaVM calls return an attached JNI environment and reject unsupport
     cpu.writeRegister("tpidr_el0", thread);
     cpu.copyIn(entry, tableCall(4));
     assert.equal(session.call(entry, [jni.environmentAddress]).registers.x0, 0x10006n);
+    cpu.copyIn(entry, tableCall(17)); cpu.writeRegister("x19", 42n);
+    assert.equal(session.call(entry, [jni.environmentAddress]).status, "returned");
+    assert.equal(cpu.readRegister("x19"), 42n);
     cpu.copyIn(entry, tableCall(6));
     assert.throws(() => session.call(entry, [jni.vmAddress, output + 4096n, 0x10006n]), /writable/);
     assert.throws(() => session.call(entry, [jni.vmAddress, output, 0x10006n]), /previous call/);

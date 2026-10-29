@@ -6,7 +6,7 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 33: "GetMethodID" };
 type JavaMethod = { className: string; name: string; descriptor: string };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -50,6 +50,8 @@ export class JniEnvironment {
       const handlers: Record<number, () => void | boolean> = {
         4: () => { this.assertEnvironment(); cpu.writeRegister("x0", BigInt(version)); },
         6: () => this.findClass(),
+        // shortcut: supported methods leave no pending exception; add exception state with the first throwing JNI API.
+        17: () => this.assertEnvironment(),
         21: () => this.retainGlobalReference(),
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
