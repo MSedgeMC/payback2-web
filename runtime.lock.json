@@ -9,5 +9,10 @@
   "adapterTransform": "Expose a live HEAPU8 getter before the factory returns; CPU semantics and embedded WASM are unchanged.",
   "toolchain": "The npm release does not publish an Emscripten version; not a reproduced compiler build.",
   "wasmSha256": "0de4811a1aa03dc837b8e5258b47d0cc8e880612451b88ebf69c927a340d36aa",
-  "wasmBytes": 1292490
+  "wasmBytes": 1292490,
+  "build": {
+    "unicornRevision": "8028ec436f2d9376525352dd38ed9ed6b9f6be10",
+    "emsdkRevision": "c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56",
+    "emscriptenVersion": "4.0.23"
+  }
 }
