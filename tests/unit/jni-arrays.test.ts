@@ -24,11 +24,36 @@ test("JNI Object arrays preserve null initialization and retain initial values a
     assert.deepEqual(references.get(empty)!.elements, []); assert.deepEqual(references.get(array)!.elements, [null, null]);
     const values = references.get(filled)!.elements;
     assert.equal(values.length, 2); assert.equal(values[0]?.value, "initial"); assert.equal(values[1], values[0]);
+    call(174, [array, 0x100000001n, initial]);
+    assert.equal(references.get(array)!.elements[1], values[0]);
     const retained = call(21, [filled]); call(23, [initial]); call(23, [filled]);
     assert.equal(references.get(retained)!.elements, values); assert.equal(values[0]?.value, "initial");
+    assert.equal(references.get(array)!.elements[1]?.value, "initial");
+    call(174, [retained, 1n, 0n]); assert.equal(values[1], null);
     cpu.copyIn(entry, tableCall(33));
     assert.throws(() => session.call(entry, [jni.environmentAddress, array, data, data]), /class reference/);
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); assert.equal(cpu.regions.length, 0); cpu.close(); }
+});
+
+test("JNI Object array writes validate array types, signed indexes, and element handles before mutation", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3); cpu.copyIn(data, new TextEncoder().encode("java/lang/Object\0"));
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    cpu.copyIn(entry, tableCall(6)); const clazz = session.call(entry, [jni.environmentAddress, data]).registers.x0;
+    cpu.copyIn(entry, tableCall(172)); const array = session.call(entry, [jni.environmentAddress, 1n, clazz, 0n]).registers.x0;
+    const pointer = cpu.copyOut(jni.vmAddress + 512n + 174n * 8n, 8), address = new DataView(pointer.buffer).getBigUint64(0, true);
+    const set = (object: bigint, index: bigint, value: bigint) => {
+      [jni.environmentAddress, object, index, value].forEach((argument, number) => cpu.writeRegister(`x${number}`, argument)); cpu.writeRegister("x30", 0x7fff0000n);
+      return session.imports.handleInterrupt(cpu.run(address, 0x7fff0000n, 20).pc);
+    };
+    assert.throws(() => set(clazz, 0n, 0n), /array reference/);
+    assert.throws(() => set(array, -1n, 0n), /index/); assert.throws(() => set(array, 1n, 0n), /index/);
+    assert.throws(() => set(array, 0n, 42n), /element reference/);
+    const references = (jni as unknown as { references: Map<bigint, { elements: unknown[] }> }).references;
+    assert.deepEqual(references.get(array)!.elements, [null]);
+    assert.equal(session.imports.atInterrupt(cpu.readRegister("pc"))?.symbol.name, "JNI.SetObjectArrayElement");
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
 
 test("JNI Object arrays validate lengths, class and initial references, and cumulative retained allocation", async () => {

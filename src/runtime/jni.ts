@@ -9,7 +9,7 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 174: "SetObjectArrayElement", 215: "RegisterNatives" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 type JavaValue = { kind: "class"; name: string } | { kind: "string"; value: string }
   | { kind: "object-array"; elements: (JavaValue | null)[] } | { kind: "boxed-long"; value: bigint };
@@ -93,6 +93,7 @@ export class JniEnvironment {
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
         172: () => this.newObjectArray(),
+        174: () => this.setObjectArrayElement(),
         215: () => this.registerNatives(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
@@ -220,6 +221,17 @@ export class JniEnvironment {
     const value = readVariadicLong(this.cpu, this.cpu.readRegister("x3"));
     this.cpu.writeRegister("x0", this.allocateReference({ kind: "boxed-long", value }, 72));
     return true;
+  }
+
+  private setObjectArrayElement(): void {
+    this.assertEnvironment();
+    const array = this.references.get(this.cpu.readRegister("x1"));
+    if (array?.kind !== "object-array") throw new RangeError("Invalid JNI Object array reference");
+    const index = Number(BigInt.asIntN(32, this.cpu.readRegister("x2")));
+    if (index < 0 || index >= array.elements.length) throw new RangeError("JNI Object array index is outside bounds");
+    const handle = this.cpu.readRegister("x3"), value = handle === 0n ? null : this.references.get(handle);
+    if (value === undefined) throw new RangeError("Invalid JNI array element reference");
+    array.elements[index] = value;
   }
 
   lookupNative(className: string, name: string, descriptor: string): bigint | undefined {
