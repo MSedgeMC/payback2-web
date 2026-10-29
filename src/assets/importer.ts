@@ -67,10 +67,18 @@ export class BoundedZip {
     } catch (error) { await reader.close(); throw error; }
   }
 
-  private file(name: string, maxBytes: number): FileEntry {
+  private entry(name: string): FileEntry | undefined {
     if (this.closed) throw new Error("ZIP reader is closed");
+    validateEntryName(name);
     const entry = this.entries.find(entry => entry.filename === name);
-    if (!entry || entry.directory) throw new Error(`Required ZIP entry ${name} is missing`);
+    return entry && !entry.directory ? entry : undefined;
+  }
+
+  entrySize(name: string): number | undefined { return this.entry(name)?.uncompressedSize; }
+
+  private file(name: string, maxBytes: number): FileEntry {
+    const entry = this.entry(name);
+    if (!entry) throw new Error(`Required ZIP entry ${name} is missing`);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || entry.uncompressedSize > maxBytes) throw new Error("Selected ZIP entry exceeds its expanded-size limit");
     return entry;
   }
@@ -141,7 +149,7 @@ export async function readPackageEngine(file: File): Promise<Uint8Array<ArrayBuf
   return (await readPackageLibraries(file)).engine;
 }
 
-export async function readPackageBytecode(file: File): Promise<Uint8Array<ArrayBuffer> | undefined> {
+export async function readPackageBase(file: File): Promise<BoundedZip | undefined> {
   // shortcut: APKM supplies the base APK and native split together; add multiple APK input when the UI accepts multiple files.
   if (!file.name.toLowerCase().endsWith(".apkm")) return undefined;
   const packageZip = await BoundedZip.open(file);
@@ -150,7 +158,12 @@ export async function readPackageBytecode(file: File): Promise<Uint8Array<ArrayB
     await verifyPackageInfo(packageZip);
     base = await packageZip.blob("base.apk", MAX_PACKAGE_BYTES);
   } finally { await packageZip.close(); }
-  const baseZip = await BoundedZip.open(base);
+  return BoundedZip.open(base);
+}
+
+export async function readPackageBytecode(file: File): Promise<Uint8Array<ArrayBuffer> | undefined> {
+  const baseZip = await readPackageBase(file);
+  if (!baseZip) return undefined;
   try { return await baseZip.bytes(SUPPORTED_GAME.startupDexName, SUPPORTED_GAME.startupDexBytes); }
   finally { await baseZip.close(); }
 }

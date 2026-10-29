@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoundedZip, readPackageEngine, readPackageLibraries, readPackageBytecode, validateEntryName } from "../../src/assets/importer.ts";
+import { BoundedZip, readPackageEngine, readPackageLibraries, readPackageBase, readPackageBytecode, validateEntryName } from "../../src/assets/importer.ts";
 import { SUPPORTED_GAME } from "../../src/assets/baseline.ts";
 import { syntheticZip } from "../fixtures/zip.ts";
 import { syntheticDex } from "../fixtures/dex.ts";
@@ -16,6 +16,26 @@ test("ZIP reader lazily extracts only selected stored and deflated entries", asy
     } finally { await archive.close(); }
     await assert.rejects(archive.bytes("assets/sample", data.byteLength), /closed/);
   }
+});
+
+test("a retained base APK reader shares lazy asset and metadata access until explicit close", async () => {
+  const data = new Uint8Array([3, 1, 4]), base = syntheticZip([
+    { name: "AndroidManifest.xml", bytes: new Uint8Array([1]) }, { name: "assets/sample", bytes: data, deflate: true },
+  ]);
+  const info = new TextEncoder().encode(JSON.stringify({ pname: SUPPORTED_GAME.package,
+    release_version: SUPPORTED_GAME.version, versioncode: SUPPORTED_GAME.versionCode }));
+  const file = new File([syntheticZip([{ name: "info.json", bytes: info },
+    { name: "base.apk", bytes: new Uint8Array(await base.arrayBuffer()), deflate: true }])], "game.apkm");
+  const archive = await readPackageBase(file); assert.ok(archive);
+  try {
+    assert.equal(archive.entrySize("AndroidManifest.xml"), 1); assert.equal(archive.entrySize("assets/sample"), 3);
+    assert.equal(archive.entrySize("missing"), undefined); assert.throws(() => archive.entrySize("../private"), /Unsafe/);
+    assert.deepEqual(await archive.bytes("assets/sample", 3), data);
+    assert.deepEqual(await archive.bytes("assets/sample", 3), data);
+  } finally { await archive.close(); }
+  assert.throws(() => archive.entrySize("assets/sample"), /closed/);
+  await assert.rejects(archive.bytes("assets/sample", 3), /closed/);
+  assert.equal(await readPackageBase(new File([base], "base.apk")), undefined);
 });
 
 test("package import extracts both native libraries without selecting unrelated entries", async () => {
