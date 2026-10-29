@@ -28,6 +28,7 @@ const classMethods: Record<string, readonly string[]> = {
     "getStringExtra(Ljava/lang/String;)Ljava/lang/String;",
     "getByteArrayExtra(Ljava/lang/String;)[B",
     "getAction()Ljava/lang/String;",
+    "setPackage(Ljava/lang/String;)Landroid/content/Intent;",
   ],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
