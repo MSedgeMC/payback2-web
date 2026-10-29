@@ -40,7 +40,10 @@ workers, and native decompression streams. No server receives game files.
 
 The execution runtime is pinned and hash-verified. Heavy runtime compilation
 is separate from ordinary application builds; the current build reuses an
-immutable ARM64-only WASM package.
+hash-pinned ARM64-only release built with Emscripten 4.0.23. The first preparation
+downloads the runtime and its build metadata; later preparations verify the
+local cache. The static application includes the runtime and works without
+fetching execution code at run time.
 
 ## License
 

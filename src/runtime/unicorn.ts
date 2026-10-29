@@ -18,7 +18,7 @@ export async function createRuntime(): Promise<RuntimeAdapter> {
 }
 
 class UnicornRuntime implements RuntimeAdapter {
-  readonly name = "Unicorn.js 2.1.4 / AArch64 / WASM TCI";
+  readonly name = "Unicorn.js / AArch64 / WASM TCI";
   readonly regions: Region[] = [];
   private readonly module: UnicornModule;
   private readonly engine: UnicornEngine;
@@ -111,7 +111,7 @@ class UnicornRuntime implements RuntimeAdapter {
       if (this.hasExecuted) {
         const region = this.regions.find(r => !!(r.permissions & 4) && address >= r.address && address < r.address + r.size);
         if (region) {
-          // This immutable npm build lacks uc_ctl. Remapping only the affected
+          // This pinned build lacks uc_ctl. Remapping only the affected
           // pages invalidates translations while retaining their bytes/rights.
           // The loading path runs before any translations exist and skips it.
           const last = address + BigInt(bytes.byteLength);

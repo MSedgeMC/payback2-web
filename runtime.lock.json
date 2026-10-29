@@ -1,15 +1,19 @@
 {
-  "package": "@alexaltea/unicorn-js",
-  "version": "2.1.4",
-  "integrity": "sha512-UAml23tgHyXEuP2A7Y50qDCNYMIRHJobsjlhetPRrtH+PXg0+BNAyvPQEKoCd+VHAF1nDfPHE4yJCqSLVtOrXA==",
   "sourceRevision": "560284c59c11c8d6c94d537f4354339f069ddcdf",
   "sourceRepository": "https://github.com/AlexAltea/unicorn.js",
   "variant": "aarch64",
-  "fileSha256": "b497aa99d973f0a5eb27fe7e14e8d32f76298bf6cc6008f9035c4a8d8b91cb37",
-  "adapterTransform": "Expose a live HEAPU8 getter before the factory returns; CPU semantics and embedded WASM are unchanged.",
-  "toolchain": "The npm release does not publish an Emscripten version; not a reproduced compiler build.",
-  "wasmSha256": "0de4811a1aa03dc837b8e5258b47d0cc8e880612451b88ebf69c927a340d36aa",
-  "wasmBytes": 1292490,
+  "fileSha256": "8d87d2a5586f9c13bba5e9445cae6f477e843656fdbafe8d50f6031a266c5c1a",
+  "fileBytes": 3904579,
+  "adapterTransform": "Expose a live HEAPU8 getter before the factory returns; embedded WASM is unchanged.",
+  "wasmSha256": "35c6fbd7e196ce8dceaf28cfed8b03574b3cca7196705ed5fa6514b20ab14cfb",
+  "wasmBytes": 3413759,
+  "release": {
+    "url": "https://github.com/MSedgeMC/payback2-web/releases/download/runtime-aarch64-v0.1.0",
+    "builderCommit": "c36c94d21b91c96257abaa5f84ff487c5442db3c",
+    "builderSha256": "c1db3f91686a251043fbb5b8c3815c29ac60afd18feace87562c33124d4e5ea4",
+    "manifestSha256": "21d13a630104dfb90bf47447ed212039a474d34b1551ce9106fb81e50d0fc4db",
+    "manifestBytes": 1217
+  },
   "build": {
     "unicornRevision": "8028ec436f2d9376525352dd38ed9ed6b9f6be10",
     "emsdkRevision": "c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56",

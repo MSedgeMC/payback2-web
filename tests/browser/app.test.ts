@@ -5,7 +5,7 @@ test("production build executes ARM64/SIMD and stops bounded guest code in its w
   await expect(page.getByRole("heading", { name: "Payback 2 Web" })).toBeVisible();
   await page.getByRole("button", { name: "Check browser compatibility" }).click();
   await expect(page.getByRole("status")).toContainText("ARM64 execution check passed");
-  await expect(page.getByLabel("Initialization diagnostics")).toContainText("Unicorn.js 2.1.4");
+  await expect(page.getByLabel("Initialization diagnostics")).toContainText("Unicorn.js / AArch64");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
 });
 
