@@ -1,0 +1,22 @@
+Payback 2 Web source code is distributed under GNU GPL version 2 only.
+The original Payback 2 application and game data are not included or relicensed.
+
+ARM64 execution runtime: Unicorn.js 2.1.4 by Alexandro Sanchez Bach and the
+Unicorn/QEMU contributors, GNU GPL version 2.
+Source: https://github.com/AlexAltea/unicorn.js/tree/560284c59c11c8d6c94d537f4354339f069ddcdf
+The pinned package and reproducible JavaScript adapter transformation are
+identified in runtime.lock.json and tools/prepare_runtime.mjs.
+The embedded WebAssembly is unchanged. This project's TypeScript source and
+build scripts are available in the same repository as the application.
+See LICENSE and the dependency source for individual copyright notices.
+
+Package reader: zip.js 2.24.0 by Gildas Lormeau and contributors, BSD-3-Clause.
+Source: https://github.com/gildas-lormeau/zip.js
+Its copyright and license are retained in public/licenses/ZIP-JS.txt.
+Only the native-stream ZIP reader is included; no archive worker or network
+decompression service is used.
+
+Build and test tools: Vite (MIT), TypeScript (Apache-2.0), Playwright
+(Apache-2.0), and Node.js type definitions (MIT). Their package license
+notices are retained in the lockfile installation. These tools do not run
+as a backend or upload user-selected game files.

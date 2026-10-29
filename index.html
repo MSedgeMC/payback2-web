@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="An independent Payback 2 browser compatibility project. Game files stay on your device." />
+    <title>Payback 2 Web</title>
+  </head>
+  <body>
+    <main>
+      <h1>Payback 2 Web</h1>
+      <p class="status-label">Experimental compatibility runtime</p>
+      <p>Gameplay is under development. This build checks browser execution and diagnoses engine initialization.</p>
+      <p>Your game files stay on your device. Supported baseline: Payback 2 2.106.16, ARM64.</p>
+      <div class="controls">
+        <button id="check" type="button">Check browser compatibility</button>
+        <label for="game">Choose APKM, ARM64 split APK, or libpayback2.so</label>
+        <input id="game" type="file" accept=".apkm,.apk,.so" />
+        <button id="stop" type="button" disabled>Stop</button>
+      </div>
+      <p id="status" role="status">Ready</p>
+      <pre id="details" aria-label="Initialization diagnostics"></pre>
+      <footer><a href="https://github.com/MSedgeMC/payback2-web">Source</a> · <a href="/licenses/GPL-2.0.txt">GPL-2.0</a></footer>
+    </main>
+    <script type="module" src="/src/app.ts"></script>
+  </body>
+</html>

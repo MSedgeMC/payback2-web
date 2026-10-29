@@ -1,0 +1,13 @@
+{
+  "package": "@alexaltea/unicorn-js",
+  "version": "2.1.4",
+  "integrity": "sha512-UAml23tgHyXEuP2A7Y50qDCNYMIRHJobsjlhetPRrtH+PXg0+BNAyvPQEKoCd+VHAF1nDfPHE4yJCqSLVtOrXA==",
+  "sourceRevision": "560284c59c11c8d6c94d537f4354339f069ddcdf",
+  "sourceRepository": "https://github.com/AlexAltea/unicorn.js",
+  "variant": "aarch64",
+  "fileSha256": "b497aa99d973f0a5eb27fe7e14e8d32f76298bf6cc6008f9035c4a8d8b91cb37",
+  "adapterTransform": "Expose a live HEAPU8 getter before the factory returns; CPU semantics and embedded WASM are unchanged.",
+  "toolchain": "The npm release does not publish an Emscripten version; not a reproduced compiler build.",
+  "wasmSha256": "0de4811a1aa03dc837b8e5258b47d0cc8e880612451b88ebf69c927a340d36aa",
+  "wasmBytes": 1292490
+}

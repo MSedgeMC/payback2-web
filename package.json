@@ -1,0 +1,26 @@
+{
+  "name": "payback2-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-2.0-only",
+  "engines": { "node": "22.23.4" },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "npm run prepare:runtime && tsc --noEmit",
+    "test": "npm run prepare:runtime && node --test --test-concurrency=1 tests/unit/*.test.ts",
+    "test:browser": "playwright test --workers=1",
+    "test:python": "python3 -m unittest discover -s tests/tools -p 'test_*.py'",
+    "bench": "npm run prepare:runtime && node tools/benchmark_runtime.ts",
+    "prepare:runtime": "node tools/prepare_runtime.mjs",
+    "check:public": "node tools/verify_public_outputs.mjs source",
+    "build": "npm run prepare:runtime && vite build && node tools/verify_public_outputs.mjs dist"
+  },
+  "dependencies": { "@alexaltea/unicorn-js": "2.1.4", "@zip.js/zip.js": "2.24.0" },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "22.18.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.5"
+  }
+}
