@@ -107,6 +107,21 @@ test("getauxval returns verified ARM64 features while unsupported queries remain
   } finally { imports.dispose(); cpu.close(); }
 });
 
+test("getpid returns the stable identifier of the isolated guest process", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu), end = 0x7fff0000n;
+  try {
+    const address = imports.resolve({ ...parseElf(syntheticElf()).symbols[1]!, name: "getpid",
+      version: { name: "LIBC", library: "libc.so" } });
+    cpu.writeRegister("x19", 123n);
+    for (let count = 0; count < 3; count++) {
+      cpu.writeRegister("x0", 999n); cpu.writeRegister("x30", end);
+      assert.equal(imports.handleInterrupt(cpu.run(address, end, 20).pc), true);
+      assert.equal(cpu.readRegister("x0"), 1n); assert.equal(cpu.readRegister("pc"), end);
+      assert.equal(cpu.readRegister("x19"), 123n);
+    }
+  } finally { imports.dispose(); cpu.close(); }
+});
+
 test("initializer native calls resume correctly and repeated calls stay bounded", async () => {
   for (const loop of [false, true]) {
     const image = parseElf(syntheticElf());
