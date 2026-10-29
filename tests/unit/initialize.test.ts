@@ -17,6 +17,24 @@ test("initializer probe runs genuine fixture code and releases its mappings", as
   } finally { cpu.close(); }
 });
 
+test("initializer code reads the ARM64 TLS stack guard and restores its caller's thread pointer", async () => {
+  const cpu = await createRuntime(), image = parseElf(syntheticElf());
+  image.bytes.set(words(0xd53bd040, 0xf9401401, 0xd65f03c0), 0x300); // mrs x0,tpidr_el0; ldr x1,[x0,#40]; ret
+  const previous = 0x55000000n, copies = new Map<bigint, Uint8Array>();
+  const copyIn = cpu.copyIn.bind(cpu);
+  cpu.copyIn = (address, bytes) => { if (bytes.length === 8) copies.set(address, bytes.slice()); copyIn(address, bytes); };
+  cpu.writeRegister("tpidr_el0", previous);
+  try {
+    const result = probeInitialization(cpu, image);
+    assert.equal(result.status, "initializers-returned");
+    const guard = copies.get(result.registers.x0 + 40n);
+    assert.ok(guard);
+    assert.equal(result.registers.x1, new DataView(guard.buffer).getBigUint64(0, true));
+    assert.equal(cpu.readRegister("tpidr_el0"), previous);
+    assert.equal(cpu.regions.length, 0);
+  } finally { cpu.close(); }
+});
+
 test("initializer budget exhaustion cannot be reported as successful execution", async () => {
   const cpu = await createRuntime();
   try {

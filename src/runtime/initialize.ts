@@ -19,6 +19,8 @@ export type InitializationProbe = {
 
 export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): InitializationProbe {
   const base = 0x10000000n, stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
+  const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
+  const previousThreadPointer = cpu.readRegister("tpidr_el0");
   const imports = new NativeImports(cpu);
   let loaded: ReturnType<typeof loadElf> | undefined;
   let stackMapped = false;
@@ -29,8 +31,12 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
   let blockedSymbol: string | undefined, blockedLibrary: string | undefined;
   try {
     loaded = loadElf(cpu, image, base, imports.resolve);
-    cpu.map(stack, stackSize, 3); stackMapped = true;
+    cpu.map(stack, ownedStackSize, 3); stackMapped = true;
     cpu.writeRegister("sp", stack + stackSize - 16n);
+    // Bionic reserves two slots before ARM64 TP; slot 5 holds the stack guard.
+    // shortcut: one initializer thread; extend its TLS when guest APIs require more state.
+    cpu.copyIn(threadPointer + 40n, crypto.getRandomValues(new Uint8Array(8)));
+    cpu.writeRegister("tpidr_el0", threadPointer);
     for (const initializer of loaded.initializers) {
       if (sliceCount >= 20 || performance.now() - started >= 3000) {
         status = "budget";
@@ -69,7 +75,8 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
                    x8: cpu.readRegister("x8"), x30: cpu.readRegister("x30"), sp: cpu.readRegister("sp") },
     };
   } finally {
-    if (stackMapped) cpu.unmap(stack, stackSize);
+    cpu.writeRegister("tpidr_el0", previousThreadPointer);
+    if (stackMapped) cpu.unmap(stack, ownedStackSize);
     loaded?.dispose(); imports.dispose();
   }
 }
