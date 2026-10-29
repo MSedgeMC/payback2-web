@@ -124,6 +124,9 @@ export class NativeImports {
       // The browser guest has an empty Android property area: missing keys return zero and an empty string.
       writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), new Uint8Array([0]));
       this.cpu.writeRegister("x0", 0n);
+    } else if (symbol.name === "strlen") {
+      const bytes = readCString(this.cpu, this.cpu.readRegister("x0"), MAX_TRANSFER_BYTES);
+      this.cpu.writeRegister("x0", BigInt(bytes.length));
     } else if (symbol.name === "memset") {
       const size = Number(this.cpu.readRegister("x2"));
       if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_BYTES) throw new RangeError("Native fill exceeds its byte limit");
