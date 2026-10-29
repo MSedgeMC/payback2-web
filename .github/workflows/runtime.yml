@@ -1,0 +1,78 @@
+name: ARM64 runtime diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/runtime.yml
+      - runtime.lock.json
+      - tools/build_runtime.py
+      - tools/check_runtime_build.mjs
+      - tools/runtime_payload.mjs
+      - tools/verify_public_outputs.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      MAKEFLAGS: -j2
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 22.23.4
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check:public
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: AlexAltea/unicorn.js
+          ref: 560284c59c11c8d6c94d537f4354339f069ddcdf
+          path: .local/unicorn-source
+          submodules: true
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: emscripten-core/emsdk
+          ref: c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56
+          path: .local/emsdk
+          persist-credentials: false
+      - name: Install pinned Emscripten
+        run: |
+          .local/emsdk/emsdk install 4.0.23
+          .local/emsdk/emsdk activate 4.0.23
+      - name: Compile ARM64-only diagnostic runtime
+        id: build
+        run: |
+          source .local/emsdk/emsdk_env.sh
+          python3 tools/build_runtime.py .local/unicorn-source .local/runtime-build
+      - name: Probe synthetic CPU and SIMD translation
+        run: node tools/check_runtime_build.mjs .local/runtime-build
+      - name: Verify public runtime outputs
+        id: public
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: node tools/verify_public_outputs.mjs runtime
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() && steps.public.outcome == 'success' }}
+        with:
+          name: arm64-runtime-diagnostics
+          retention-days: 3
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            .local/runtime-build/unicorn-aarch64.cjs
+            .local/runtime-build/runtime-build.json
+            .local/runtime-build/GPL-2.0.txt
