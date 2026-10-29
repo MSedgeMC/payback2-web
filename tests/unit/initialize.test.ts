@@ -3,8 +3,9 @@ import { test } from "node:test";
 import { createRuntime } from "../../src/runtime/unicorn.ts";
 import { parseElf } from "../../src/runtime/elf.ts";
 import { probeInitialization } from "../../src/runtime/initialize.ts";
-import { DiagnosticImports } from "../../src/runtime/symbols.ts";
+import { NativeImports } from "../../src/runtime/symbols.ts";
 import { syntheticElf } from "../fixtures/elf.ts";
+import { words } from "../fixtures/aarch64.ts";
 
 test("initializer probe runs genuine fixture code and releases its mappings", async () => {
   const cpu = await createRuntime();
@@ -32,7 +33,7 @@ test("initializer budget exhaustion cannot be reported as successful execution",
 
 test("diagnostic function imports trap instead of pretending to implement an API", async () => {
   const cpu = await createRuntime();
-  const imports = new DiagnosticImports(cpu);
+  const imports = new NativeImports(cpu);
   try {
     const symbol = parseElf(syntheticElf()).symbols[1]!;
     const address = imports.resolve(symbol);
@@ -47,7 +48,7 @@ test("diagnostic function imports trap instead of pretending to implement an API
 });
 
 test("native imports with different version requirements cannot silently alias", async () => {
-  const cpu = await createRuntime(), imports = new DiagnosticImports(cpu);
+  const cpu = await createRuntime(), imports = new NativeImports(cpu);
   try {
     const symbol = { ...parseElf(syntheticElf()).symbols[1]!, version: { name: "LIBC", library: "libc.so" } };
     const first = imports.resolve(symbol);
@@ -57,4 +58,47 @@ test("native imports with different version requirements cannot silently alias",
     assert.throws(() => imports.resolve({ ...symbol, type: 1 }), /Conflicting/);
     assert.equal(cpu.run(second, 0x7fff0000n, 20).reason, "interrupt");
   } finally { imports.dispose(); cpu.close(); }
+});
+
+test("getauxval returns verified ARM64 features while unsupported queries remain blocked", async () => {
+  const cpu = await createRuntime(), imports = new NativeImports(cpu);
+  try {
+    const symbol = { ...parseElf(syntheticElf()).symbols[1]!, name: "getauxval",
+                     version: { name: "LIBC", library: "libc.so" } };
+    const address = imports.resolve(symbol), end = 0x7fff0000n;
+    cpu.writeRegister("x0", 16n); cpu.writeRegister("x30", end); cpu.writeRegister("x19", 123n);
+    const result = cpu.run(address, end, 20);
+    assert.equal(result.reason, "interrupt");
+    assert.equal(imports.handleInterrupt(result.pc), true);
+    assert.equal(cpu.readRegister("x0"), 3n);
+    assert.equal(cpu.readRegister("pc"), end);
+    assert.equal(cpu.readRegister("x19"), 123n);
+    cpu.writeRegister("x0", 6n);
+    assert.equal(imports.handleInterrupt(result.pc), false);
+    assert.equal(cpu.readRegister("x0"), 6n);
+    const other = imports.resolve({ ...symbol, version: { name: "LIBC", library: "other.so" } });
+    cpu.writeRegister("x0", 16n);
+    assert.equal(imports.handleInterrupt(cpu.run(other, end, 20).pc), false);
+  } finally { imports.dispose(); cpu.close(); }
+});
+
+test("initializer native calls resume correctly and repeated calls stay bounded", async () => {
+  for (const loop of [false, true]) {
+    const image = parseElf(syntheticElf());
+    image.symbols[1]!.name = "getauxval";
+    image.symbols[1]!.version = { name: "LIBC", library: "libc.so" };
+    image.relocations[0]!.addend = 0n;
+    const offset = 0x22b0 - 0x308;
+    const loadAddress = 0x10000010 | ((offset & 3) << 29) | ((offset >>> 2) << 5);
+    image.bytes.set(words(0xa9bf7bfd, 0x52800200, loadAddress, 0xf9400210,
+                          0xd63f0200, loop ? 0x17fffffc : 0xa8c17bfd, 0xd65f03c0), 0x300);
+    const cpu = await createRuntime();
+    try {
+      const result = probeInitialization(cpu, image);
+      assert.equal(result.status, loop ? "budget" : "initializers-returned");
+      assert.equal(result.completedInitializers, loop ? 0 : 2);
+      assert.equal(result.blockedSymbol, undefined);
+      assert.equal(cpu.regions.length, 0);
+    } finally { cpu.close(); }
+  }
 });

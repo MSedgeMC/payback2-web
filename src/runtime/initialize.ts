@@ -1,7 +1,7 @@
 import type { ExecutionResult, RuntimeAdapter } from "./adapter.ts";
 import { loadElf } from "./elf.ts";
 import type { ElfImage } from "./elf.ts";
-import { DiagnosticImports } from "./symbols.ts";
+import { NativeImports } from "./symbols.ts";
 
 export type InitializationProbe = {
   status: "blocked-import" | "blocked-interrupt" | "fault" | "budget" | "initializers-returned";
@@ -19,7 +19,7 @@ export type InitializationProbe = {
 
 export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): InitializationProbe {
   const base = 0x10000000n, stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
-  const imports = new DiagnosticImports(cpu);
+  const imports = new NativeImports(cpu);
   let loaded: ReturnType<typeof loadElf> | undefined;
   let stackMapped = false;
   const started = performance.now();
@@ -43,6 +43,11 @@ export function probeInitialization(cpu: RuntimeAdapter, image: ElfImage): Initi
         sliceCount++;
         last = cpu.run(pc, sentinel, 10_000);
         pc = last.pc;
+        if (last.reason === "interrupt" && imports.handleInterrupt(last.pc)) {
+          pc = cpu.readRegister("pc");
+          last = { reason: "budget", pc, elapsedMs: last.elapsedMs };
+          continue;
+        }
         if (last.reason === "budget") continue;
         break;
       }
