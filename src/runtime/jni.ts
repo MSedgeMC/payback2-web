@@ -1,11 +1,15 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
-import type { JavaClass } from "./dex.ts";
+import type { DexFile, JavaClass } from "./dex.ts";
+import type { BoundedZip } from "../assets/importer.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { decodeModifiedUtf8, MAX_MODIFIED_UTF8_BYTES } from "./modified-utf8.ts";
-import { readVariadicLong } from "./aarch64-varargs.ts";
-import type { NativeImports } from "./symbols.ts";
-import type { JavaValue } from "./java-values.ts";
+import { readVariadicLong, readVariadicWords } from "./aarch64-varargs.ts";
+import type { NativeDispatch, NativeImports } from "./symbols.ts";
+import type { JavaDatum, JavaExecution, JavaRequest, JavaValue } from "./java-values.ts";
+import { parseJavaMethod } from "./java-descriptors.ts";
+import { JavaMachine } from "./java-machine.ts";
+import { JavaPlatform } from "./java-platform.ts";
 
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
@@ -56,6 +60,7 @@ export class JniEnvironment {
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
   private readonly references = new Map<bigint, { value: JavaValue; global: boolean }>();
+  private readonly localFrames: Set<bigint>[] = [new Set()];
   private readonly methods = new Map<bigint, JavaMethod>();
   private readonly classes = new Map<string, JavaClass>();
   private readonly nativeMethods = new Map<string, bigint>();
@@ -64,6 +69,7 @@ export class JniEnvironment {
   private allocatedValueBytes = 0;
   private mapped = false;
   private disposed = false;
+  private java: JavaMachine | undefined;
 
   constructor(cpu: RuntimeAdapter, imports: NativeImports) {
     this.cpu = cpu; this.threadPointer = cpu.readRegister("tpidr_el0");
@@ -78,7 +84,7 @@ export class JniEnvironment {
         const address = name === "GetEnv" ? imports.bind(entry, () => this.getEnvironment()) : imports.resolve(entry);
         view.setBigUint64(256 + (index + 3) * 8, address, true);
       }
-      const handlers: Record<number, () => void | boolean> = {
+      const handlers: Record<number, () => NativeDispatch> = {
         4: () => { this.assertEnvironment(); cpu.writeRegister("x0", BigInt(version)); },
         6: () => this.findClass(),
         // shortcut: supported methods leave no pending exception; add exception state with the first throwing JNI API.
@@ -89,6 +95,7 @@ export class JniEnvironment {
         29: () => this.newObjectV(),
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
+        115: () => this.callStaticObjectMethodV(),
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
         172: () => this.newObjectArray(),
@@ -104,6 +111,11 @@ export class JniEnvironment {
       }
       cpu.copyIn(this.vmAddress, bytes); cpu.protect(this.vmAddress, 4096n, 1);
     } catch (error) { this.dispose(); throw error; }
+  }
+
+  attachBytecode(dex: DexFile, base: BoundedZip | undefined, libraryLoaded: (name: string) => boolean): void {
+    if (this.disposed || this.java) throw new Error("JNI bytecode environment is disposed or already attached");
+    this.java = new JavaMachine(dex, bytes => this.reserveValueBytes(bytes), machine => new JavaPlatform(machine, base, libraryLoaded));
   }
 
   defineClass(definition: JavaClass): void {
@@ -126,8 +138,8 @@ export class JniEnvironment {
   private findClass(): boolean {
     this.assertEnvironment();
     const name = this.argumentString(1);
-    if (!Object.hasOwn(classMethods, name) && !this.classes.has(name)) return false;
-    this.cpu.writeRegister("x0", this.addReference({ kind: "class", name }, false));
+    if (!Object.hasOwn(classMethods, name) && !this.classes.has(name) && !this.java?.hasClass(name)) return false;
+    this.cpu.writeRegister("x0", this.addReference(this.java?.classValue(name) ?? { kind: "class", name }, false));
     return true;
   }
 
@@ -135,13 +147,14 @@ export class JniEnvironment {
     return new TextDecoder("utf-8", { fatal: true }).decode(readCString(this.cpu, this.cpu.readRegister(`x${index}`), 256));
   }
 
-  private getMethod(isStatic: boolean): boolean {
+  private getMethod(isStatic: boolean): NativeDispatch {
     this.assertEnvironment();
     const entry = this.classReference(this.cpu.readRegister("x1"));
     const name = this.argumentString(2), descriptor = this.argumentString(3);
     const definitions = isStatic ? staticMethods : classMethods;
     const builtin = Object.hasOwn(definitions, entry.name) && definitions[entry.name]!.includes(name + descriptor);
-    const declared = this.classes.get(entry.name)?.methods.find(method => method.name === name && method.descriptor === descriptor && method.isStatic === isStatic);
+    const definitions_ = this.classes.get(entry.name) ?? this.java?.sourceClass(entry.name);
+    const declared = definitions_?.methods.find(method => method.name === name && method.descriptor === descriptor && method.isStatic === isStatic);
     if (name.includes("(") || !descriptor.startsWith("(") || !builtin && !declared) return false;
     let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name &&
       method.descriptor === descriptor && method.isStatic === isStatic)?.[0];
@@ -150,7 +163,8 @@ export class JniEnvironment {
       address = 0x74000000n + BigInt(this.methods.size * 8);
       this.methods.set(address, { className: entry.name, name, descriptor, isStatic, isNative: declared?.isNative ?? false });
     }
-    this.cpu.writeRegister("x0", address); return true;
+    const complete = (): NativeDispatch => { this.cpu.writeRegister("x0", address!); return true; };
+    return this.java?.sourceClass(entry.name) ? this.runJava(this.java.initializeClass(entry.name), complete) : complete();
   }
 
   private getStaticField(): boolean {
@@ -179,6 +193,7 @@ export class JniEnvironment {
     if (this.references.size >= 256) throw new RangeError("JNI reference limit exceeded");
     const reference = this.nextReference; this.nextReference += 8n;
     this.references.set(reference, { value, global });
+    if (!global) this.localFrames.at(-1)!.add(reference);
     return reference;
   }
 
@@ -191,10 +206,15 @@ export class JniEnvironment {
   }
 
   private allocateReference(value: JavaValue, bytes: number): bigint {
+    this.reserveValueBytes(bytes);
+    return this.addReference(value, false);
+  }
+
+  private reserveValueBytes(bytes: number): void {
     // shortcut: cumulative 16 MiB startup value budget; reclaim accounting with guest garbage collection.
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new RangeError("Invalid JNI value allocation size");
     if (this.allocatedValueBytes + bytes > 16 * 1024 * 1024) throw new RangeError("JNI value allocation budget exceeded");
-    const reference = this.addReference(value, false); this.allocatedValueBytes += bytes;
-    return reference;
+    this.allocatedValueBytes += bytes;
   }
 
   private newObjectArray(): boolean {
@@ -245,6 +265,69 @@ export class JniEnvironment {
     return entry.value;
   }
 
+  private callStaticObjectMethodV(): NativeDispatch {
+    this.assertEnvironment();
+    const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
+    if (!method || !method.isStatic || method.className !== clazz.name) throw new RangeError("Invalid JNI static method identifier");
+    const signature = parseJavaMethod(method.descriptor);
+    if (!signature.result.startsWith("L") && !signature.result.startsWith("[")) throw new RangeError("JNI static Object call has a different return type");
+    if (!this.java) return false;
+    if (signature.parameters.some(type => type === "F" || type === "D")) return false;
+    const words = readVariadicWords(this.cpu, this.cpu.readRegister("x3"), signature.parameters.length);
+    const args = signature.parameters.map((type, index): JavaDatum => {
+      const word = words[index]!;
+      if (type.startsWith("L") || type.startsWith("[")) return this.referenceValue(word);
+      if (type === "J") return BigInt.asIntN(64, word);
+      if ("ZBCSI".includes(type)) return Number(BigInt.asIntN(32, word));
+      throw new Error(`Unsupported JNI variadic argument type ${type}`);
+    });
+    return this.runJava(this.java.invoke(method, args), value => {
+      const object = this.java!.object(value); this.cpu.writeRegister("x0", object ? this.addReference(object, false) : 0n);
+    });
+  }
+
+  private runJava(execution: JavaExecution, complete: (value: JavaDatum) => NativeDispatch,
+                  step = execution.next()): NativeDispatch {
+    if (this.disposed || !this.java || this.cpu.readRegister("tpidr_el0") !== this.threadPointer) throw new Error("Foreign or disposed managed JNI call");
+    if (step.done) return complete(step.value);
+    const request = step.value;
+    if (request.kind === "wait") return { kind: "wait", ready: request.ready,
+      onReady: value => this.runJava(execution, complete, execution.next(value as JavaDatum)),
+      onError: error => this.runJava(execution, complete, execution.throw(error)) };
+    return this.enterJavaNative(request, value => this.runJava(execution, complete, execution.next(value)));
+  }
+
+  private enterJavaNative(request: Extract<JavaRequest, { kind: "native" }>, returned: (value: JavaDatum) => NativeDispatch): NativeDispatch {
+    const method = request.method, signature = parseJavaMethod(method.descriptor), address = this.lookupNative(method.className, method.name, method.descriptor);
+    if (address === undefined) throw new Error(`Java native method is not registered: ${method.className}.${method.name}`);
+    if (signature.parameters.length > 6 || signature.parameters.some(type => type === "F" || type === "D") || this.localFrames.length >= 32) throw new Error("Unsupported Java native arguments or excessive frame nesting");
+    const frame = new Set<bigint>(); this.localFrames.push(frame);
+    let args: bigint[];
+    try {
+      const receiver = request.isStatic ? this.java!.classValue(method.className) : this.java!.object(request.args[0]!)!;
+      args = [this.environmentAddress, this.addReference(receiver, false), ...signature.parameters.map((type, index) => {
+        const value = request.args[index + (request.isStatic ? 0 : 1)]!;
+        if (type.startsWith("L") || type.startsWith("[")) { const object = this.java!.object(value); return object ? this.addReference(object, false) : 0n; }
+        return typeof value === "bigint" ? BigInt.asUintN(64, value) : BigInt(this.java!.integer(value));
+      })];
+    } catch (error) { this.closeLocalFrame(frame); throw error; }
+    return { kind: "call", address, args, onReturn: bits => {
+      let value: JavaDatum;
+      if (signature.result === "V") value = null;
+      else if (signature.result.startsWith("L") || signature.result.startsWith("[")) value = this.referenceValue(bits);
+      else if (signature.result === "J") value = BigInt.asIntN(64, bits);
+      else if ("ZBCSI".includes(signature.result)) value = Number(BigInt.asIntN(32, bits));
+      else throw new Error(`Unsupported Java native return type ${signature.result}`);
+      this.closeLocalFrame(frame); return returned(value);
+    } };
+  }
+
+  private closeLocalFrame(frame: Set<bigint>): void {
+    if (this.localFrames.at(-1) !== frame) throw new Error("JNI local frames returned out of order");
+    for (const reference of frame) this.references.delete(reference);
+    this.localFrames.pop();
+  }
+
   private registerNatives(): boolean {
     this.assertEnvironment();
     const entry = this.classReference(this.cpu.readRegister("x1"));
@@ -256,7 +339,7 @@ export class JniEnvironment {
     const pending = new Map<string, bigint>();
     for (let index = 0; index < count; index++) {
       const offset = index * 24, name = string(offset), descriptor = string(offset + 8), address = view.getBigUint64(offset + 16, true);
-      const declarations = this.classes.get(entry.name)?.methods.filter(method => method.name === name && method.descriptor === descriptor);
+      const declarations = (this.classes.get(entry.name) ?? this.java?.sourceClass(entry.name))?.methods.filter(method => method.name === name && method.descriptor === descriptor);
       if (declarations?.length !== 1 || !declarations[0]!.isNative) return false;
       if (address % 4n || !this.cpu.regions.some(region => (region.permissions & 4) && address >= region.address && address + 4n <= region.address + region.size)) {
         throw new RangeError("JNI native method is outside executable guest memory");
@@ -285,6 +368,7 @@ export class JniEnvironment {
     const entry = this.references.get(reference);
     if (!entry || entry.global !== global) throw new RangeError("Invalid JNI reference or lifetime");
     this.references.delete(reference);
+    if (!global) for (const frame of this.localFrames) frame.delete(reference);
   }
 
   private assertEnvironment(): void {
@@ -306,7 +390,9 @@ export class JniEnvironment {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.java?.dispose(); this.java = undefined;
     this.references.clear();
+    this.localFrames.length = 0;
     this.methods.clear();
     this.classes.clear();
     this.nativeMethods.clear();

@@ -95,6 +95,11 @@ export class NativeSession {
     return loaded;
   }
 
+  isLibraryInitialized(name: string): boolean {
+    const loaded = this.libraries.get(name);
+    return !this.disposed && loaded !== undefined && this.initialized.has(loaded);
+  }
+
   initialize(loaded: LoadedElf): InitializationProbe {
     this.checkInitialization(loaded);
     return this.finishInitialization(loaded, this.execute(loaded.initializers));
