@@ -32,6 +32,26 @@ test("AArch64 SIMD adds four independent 32-bit lanes", async () => {
   } finally { cpu.close(); }
 });
 
+test("AArch64 SIMD shifts use signed low-byte counts and unsigned 64-bit lanes", async () => {
+  const cpu = await createRuntime();
+  try {
+    cpu.map(BASE, 4096n, 5);
+    cpu.copyIn(BASE, words(0x6ee14402, 0xd65f03c0)); // ushl v2.2d,v0.2d,v1.2d; ret
+    const input = new BigUint64Array([0x8000000000000003n, 0x8000000000000001n]);
+    for (const { shifts, expected } of [
+      { shifts: [1n, -1n], expected: [6n, 0x4000000000000000n] },
+      { shifts: [-64n, 64n], expected: [0n, 0n] },
+      { shifts: [256n, 255n], expected: [input[0]!, 0x4000000000000000n] },
+    ]) {
+      cpu.writeVector(0, new Uint8Array(input.buffer));
+      cpu.writeVector(1, new Uint8Array(new BigUint64Array(shifts).buffer));
+      cpu.writeRegister("x30", END);
+      assert.equal(cpu.run(BASE, END, 20).reason, "end");
+      assert.deepEqual(new BigUint64Array(cpu.readVector(2).buffer), new BigUint64Array(expected));
+    }
+  } finally { cpu.close(); }
+});
+
 test("AArch64 floating point arithmetic and conversion preserve register lanes", async () => {
   const cpu = await createRuntime();
   try {
