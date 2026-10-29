@@ -1,5 +1,6 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfImage } from "./elf.ts";
+import type { JavaClass } from "./dex.ts";
 import { NativeSession, probeInitialization } from "./initialize.ts";
 import type { InitializationProbe, NativeCallProbe } from "./initialize.ts";
 import { JniEnvironment, isSupportedJniVersion } from "./jni.ts";
@@ -11,12 +12,13 @@ export type GameStartupProbe = {
   dependencyJni?: NativeCallProbe;
 };
 
-export function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pairip?: ElfImage): GameStartupProbe {
+export function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pairip?: ElfImage, javaClass?: JavaClass): GameStartupProbe {
   if (!pairip) return { stage: "engine-constructors", result: probeInitialization(cpu, engine) };
   const session = new NativeSession(cpu);
   let jni: JniEnvironment | undefined;
   try {
     jni = new JniEnvironment(cpu, session.imports);
+    if (javaClass) jni.defineClass(javaClass);
     const core = session.load("libpairipcore.so", pairip, 0x20000000n);
     const dependencyInitializers = session.initialize(core);
     if (dependencyInitializers.status !== "initializers-returned") {
