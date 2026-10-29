@@ -7,9 +7,13 @@ import type { ExecutionResult, Register, Region, RuntimeAdapter } from "./adapte
 import type { UnicornEngine, UnicornModule } from "./unicorn-types.ts";
 
 let modulePromise: Promise<UnicornModule> | undefined;
+const runtimeDiagnostics: string[] = [];
 
 export async function createRuntime(): Promise<RuntimeAdapter> {
-  modulePromise ??= createUnicorn({ print: () => {}, printErr: () => {} });
+  modulePromise ??= createUnicorn({ print: () => {}, printErr: (message: unknown) => {
+    runtimeDiagnostics.push(String(message).slice(0, 500));
+    if (runtimeDiagnostics.length > 4) runtimeDiagnostics.shift();
+  } });
   return new UnicornRuntime(await modulePromise);
 }
 
@@ -167,6 +171,7 @@ class UnicornRuntime implements RuntimeAdapter {
     this.hasExecuted = true;
     this.interrupt = undefined;
     this.memoryFault = undefined;
+    runtimeDiagnostics.length = 0;
     const started = performance.now();
     let diagnostic: string | undefined;
     try {
@@ -174,7 +179,7 @@ class UnicornRuntime implements RuntimeAdapter {
       // is used here. The owning worker also has a termination deadline.
       this.engine.emu_start(begin, end, 0, instructionLimit);
     } catch (error) {
-      diagnostic = this.memoryFault ?? String(error).slice(0, 500);
+      diagnostic = this.memoryFault ?? [...runtimeDiagnostics, String(error)].join("\n").slice(0, 500);
     } finally {
       this.running = false;
     }
