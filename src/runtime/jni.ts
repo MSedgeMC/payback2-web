@@ -1,6 +1,6 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
-import { writeGuestBytes } from "./guest-memory.ts";
+import { readCString, writeGuestBytes } from "./guest-memory.ts";
 import type { NativeImports } from "./symbols.ts";
 
 const version = 0x00010006;
@@ -15,6 +15,8 @@ export class JniEnvironment {
   readonly environmentAddress = this.vmAddress + 8n;
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
+  private readonly references = new Map<bigint, string>();
+  private nextReference = 0x73000000n;
   private mapped = false;
   private disposed = false;
 
@@ -31,16 +33,30 @@ export class JniEnvironment {
         const address = name === "GetEnv" ? imports.bind(entry, () => this.getEnvironment()) : imports.resolve(entry);
         view.setBigUint64(256 + (index + 3) * 8, address, true);
       }
+      const handlers: Record<number, () => void | boolean> = {
+        4: () => { this.assertEnvironment(); cpu.writeRegister("x0", BigInt(version)); },
+        6: () => this.findClass(),
+      };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
         const entry = symbol(`JNI.${methodNames[index] ?? `slot_${index}`}`, "JNIEnv");
-        const address = index === 4 ? imports.bind(entry, () => {
-          this.assertEnvironment(); cpu.writeRegister("x0", BigInt(version));
-        }) : imports.resolve(entry);
+        const handler = handlers[index];
+        const address = handler ? imports.bind(entry, handler) : imports.resolve(entry);
         view.setBigUint64(512 + index * 8, address, true);
       }
       cpu.copyIn(this.vmAddress, bytes); cpu.protect(this.vmAddress, 4096n, 1);
     } catch (error) { this.dispose(); throw error; }
+  }
+
+  private findClass(): boolean {
+    this.assertEnvironment();
+    const name = new TextDecoder("utf-8", { fatal: true }).decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256));
+    // shortcut: the standard Float class only; add class definitions when an observed caller requires them.
+    if (name !== "java/lang/Float") return false;
+    if (this.references.size >= 256) throw new RangeError("JNI class reference limit exceeded");
+    const reference = this.nextReference; this.nextReference += 8n;
+    this.references.set(reference, name); this.cpu.writeRegister("x0", reference);
+    return true;
   }
 
   private assertEnvironment(): void {
@@ -62,6 +78,7 @@ export class JniEnvironment {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.references.clear();
     if (this.mapped) this.cpu.unmap(this.vmAddress, 4096n);
   }
 }
