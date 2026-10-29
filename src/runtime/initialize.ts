@@ -24,7 +24,7 @@ export type InitializationProbe = Omit<NativeCallProbe, "status"> & {
 
 const stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
 const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
-const maximumSlices = 100, instructionsPerSlice = 2_000;
+const maximumSlices = 400, instructionsPerSlice = 500;
 
 export class NativeSession {
   readonly imports: NativeImports;
