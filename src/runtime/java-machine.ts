@@ -10,6 +10,8 @@ const wideTail = Symbol("wide register tail");
 const exceptionParents: Record<string, string> = {
   "java/lang/Throwable": "java/lang/Object", "java/lang/Exception": "java/lang/Throwable",
   "java/lang/RuntimeException": "java/lang/Exception", "java/io/IOException": "java/lang/Exception",
+  "java/io/FileNotFoundException": "java/io/IOException", "java/lang/StringIndexOutOfBoundsException": "java/lang/IndexOutOfBoundsException",
+  "java/lang/Error": "java/lang/Throwable", "java/lang/LinkageError": "java/lang/Error", "java/lang/UnsatisfiedLinkError": "java/lang/LinkageError",
   "java/lang/ReflectiveOperationException": "java/lang/Exception",
   "java/lang/ClassNotFoundException": "java/lang/ReflectiveOperationException",
   "java/lang/ArithmeticException": "java/lang/RuntimeException", "java/lang/NullPointerException": "java/lang/RuntimeException",
@@ -55,8 +57,10 @@ export class JavaMachine {
   hasClass(name: string): boolean { return !!this.sourceClass(name) || !!this.host?.hasClass(name); }
 
   make<T extends JavaValue>(value: T, bytes: number): T {
-    this.assertActive(); this.reserve(bytes); return value;
+    this.accountBytes(bytes); return value;
   }
+
+  accountBytes(bytes: number): void { this.assertActive(); this.reserve(bytes); }
 
   stringValue(value: string, intern = false): Extract<JavaValue, { kind: "string" }> {
     const existing = intern && this.strings.get(value); if (existing) return existing;
@@ -148,6 +152,7 @@ export class JavaMachine {
       if (args.length !== signature.parameters.length + (isStatic ? 0 : 1)) throw new Error("Java call argument count disagrees with its descriptor");
       const receiver = isStatic ? null : this.object(args[0]!);
       if (!isStatic && !receiver) this.raise("java/lang/NullPointerException", "Null Java method receiver");
+      if (receiver && !this.isAssignable(javaClassName(receiver), reference.className)) throw new Error("Java method receiver has an incompatible class");
       const checked = signature.parameters.map((type, index) => this.checkValue(args[index + (isStatic ? 0 : 1)]!, type));
       if (receiver) checked.unshift(receiver);
       let owner = reference.className, definition = this.sourceClass(owner);
