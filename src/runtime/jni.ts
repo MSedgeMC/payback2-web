@@ -17,6 +17,7 @@ const classMethods: Record<string, readonly string[]> = {
   "java/lang/Short": ["<init>(S)V", "shortValue()S"],
   "java/lang/Byte": ["<init>(B)V", "byteValue()B"],
   "java/lang/Character": ["<init>(C)V", "charValue()C"],
+  "java/lang/Boolean": [],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
