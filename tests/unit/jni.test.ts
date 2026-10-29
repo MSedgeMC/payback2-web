@@ -70,3 +70,30 @@ test("JNI Float class lookup creates bounded local handles and validates guest s
     assert.throws(() => invalidSession.call(entry, [invalidJni.environmentAddress, 0n]), /readable/);
   } finally { invalidJni.dispose(); invalidSession.dispose(); invalidCpu.close(); }
 });
+
+test("JNI global class references retain identity after local release and reject stale or wrong-lifetime handles", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3); cpu.copyIn(data, new TextEncoder().encode("java/lang/Float\0"));
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    const call = (index: number, argument: bigint): bigint => {
+      cpu.copyIn(entry, tableCall(index));
+      const result = session.call(entry, [jni.environmentAddress, argument]);
+      assert.equal(result.status, "returned"); return result.registers.x0;
+    };
+    const local = call(6, data), global = call(21, local);
+    assert.notEqual(global, local); assert.notEqual(global, 0n);
+    call(23, local);
+    const retained = call(21, global); assert.notEqual(retained, 0n);
+    call(22, global); call(22, retained);
+    assert.equal(call(21, 0n), 0n); call(22, 0n); call(23, 0n);
+    const wrongLifetime = call(6, data);
+    assert.throws(() => call(22, wrongLifetime), /lifetime/);
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+  const staleCpu = await createRuntime(), staleSession = new NativeSession(staleCpu), staleJni = new JniEnvironment(staleCpu, staleSession.imports);
+  try {
+    const image = parseElf(syntheticElf()); image.bytes.set(tableCall(21), 0x300);
+    const entry = staleSession.load("jni_fixture.so", image, 0x10000000n).lookupExport("local");
+    assert.throws(() => staleSession.call(entry, [staleJni.environmentAddress, 0x73000000n]), /Invalid JNI class reference/);
+  } finally { staleJni.dispose(); staleSession.dispose(); staleCpu.close(); }
+});

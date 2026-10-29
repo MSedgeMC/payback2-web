@@ -6,7 +6,7 @@ import type { NativeImports } from "./symbols.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef" };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
   section: 0, address: 0n, size: 0n, version: { name: "JNI", library } });
 
@@ -15,7 +15,7 @@ export class JniEnvironment {
   readonly environmentAddress = this.vmAddress + 8n;
   private readonly cpu: RuntimeAdapter;
   private readonly threadPointer: bigint;
-  private readonly references = new Map<bigint, string>();
+  private readonly references = new Map<bigint, { name: string; global: boolean }>();
   private nextReference = 0x73000000n;
   private mapped = false;
   private disposed = false;
@@ -36,6 +36,9 @@ export class JniEnvironment {
       const handlers: Record<number, () => void | boolean> = {
         4: () => { this.assertEnvironment(); cpu.writeRegister("x0", BigInt(version)); },
         6: () => this.findClass(),
+        21: () => this.retainGlobalReference(),
+        22: () => this.deleteReference(true),
+        23: () => this.deleteReference(false),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
@@ -53,10 +56,33 @@ export class JniEnvironment {
     const name = new TextDecoder("utf-8", { fatal: true }).decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256));
     // shortcut: the standard Float class only; add class definitions when an observed caller requires them.
     if (name !== "java/lang/Float") return false;
+    this.cpu.writeRegister("x0", this.addReference(name, false));
+    return true;
+  }
+
+  private addReference(name: string, global: boolean): bigint {
     if (this.references.size >= 256) throw new RangeError("JNI class reference limit exceeded");
     const reference = this.nextReference; this.nextReference += 8n;
-    this.references.set(reference, name); this.cpu.writeRegister("x0", reference);
-    return true;
+    this.references.set(reference, { name, global });
+    return reference;
+  }
+
+  private retainGlobalReference(): void {
+    this.assertEnvironment();
+    const reference = this.cpu.readRegister("x1");
+    if (reference === 0n) { this.cpu.writeRegister("x0", 0n); return; }
+    const entry = this.references.get(reference);
+    if (!entry) throw new RangeError("Invalid JNI class reference");
+    this.cpu.writeRegister("x0", this.addReference(entry.name, true));
+  }
+
+  private deleteReference(global: boolean): void {
+    this.assertEnvironment();
+    const reference = this.cpu.readRegister("x1");
+    if (reference === 0n) return;
+    const entry = this.references.get(reference);
+    if (!entry || entry.global !== global) throw new RangeError("Invalid JNI reference or lifetime");
+    this.references.delete(reference);
   }
 
   private assertEnvironment(): void {
