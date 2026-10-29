@@ -56,6 +56,10 @@ def build(source_root: Path, output: Path) -> None:
     # Full CONFIG_DEBUG_TCG has incomplete upstream context plumbing; enable interpreter assertions directly.
     interpreter = source_root / "unicorn/qemu/tcg/tci.c"
     interpreter.write_text(enable_interpreter_assertions(interpreter.read_text()))
+    # The interpreter can spill every temporary; reserve the translator's existing maximum.
+    header = source_root / "unicorn/qemu/include/tcg/tcg.h"
+    header.write_text(replace_once(header.read_text(), "#define CPU_TEMP_BUF_NLONGS 128",
+                                   "#define CPU_TEMP_BUF_NLONGS TCG_MAX_TEMPS"))
     module.generateConstants()
     module.compileUnicorn(["aarch64"])
     output.mkdir(parents=True, exist_ok=True)
