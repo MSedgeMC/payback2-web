@@ -19,6 +19,13 @@ def replace_once(source: str, original: str, replacement: str) -> str:
     return source.replace(original, replacement)
 
 
+def enable_interpreter_assertions(source: str) -> str:
+    source = replace_once(source, "#if defined(CONFIG_DEBUG_TCG)\n# define tci_assert",
+                          "#if !defined(NDEBUG)\n# define tci_assert")
+    return replace_once(source, "#if defined(CONFIG_DEBUG_TCG) && !defined(NDEBUG)",
+                        "#if !defined(NDEBUG)")
+
+
 def build(source_root: Path, output: Path) -> None:
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Heavy runtime compilation belongs on GitHub-hosted Actions")
@@ -48,8 +55,7 @@ def build(source_root: Path, output: Path) -> None:
     module.patchUnicorn()
     # Full CONFIG_DEBUG_TCG has incomplete upstream context plumbing; enable interpreter assertions directly.
     interpreter = source_root / "unicorn/qemu/tcg/tci.c"
-    interpreter.write_text(replace_once(interpreter.read_text(), "# define tci_assert(cond) ((void)0)",
-                                         "# define tci_assert(cond) assert(cond)"))
+    interpreter.write_text(enable_interpreter_assertions(interpreter.read_text()))
     module.generateConstants()
     module.compileUnicorn(["aarch64"])
     output.mkdir(parents=True, exist_ok=True)
