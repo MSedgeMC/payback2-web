@@ -26,6 +26,7 @@ const classMethods: Record<string, readonly string[]> = {
     "hasExtra(Ljava/lang/String;)Z",
     "getIntExtra(Ljava/lang/String;I)I",
     "getStringExtra(Ljava/lang/String;)Ljava/lang/String;",
+    "getByteArrayExtra(Ljava/lang/String;)[B",
   ],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
