@@ -36,8 +36,7 @@ def build(source_root: Path, output: Path) -> None:
     build_script = source_root / "build.py"
     source = build_script.read_text()
     source = replace_once(source, "jobs = os.cpu_count() or 1", "jobs = min(2, os.cpu_count() or 1)")
-    source = replace_once(source, "'-DCMAKE_BUILD_TYPE=Release',",
-                          "'-DCMAKE_BUILD_TYPE=Debug',\n        '-DCMAKE_C_FLAGS=-DCONFIG_DEBUG_TCG',")
+    source = replace_once(source, "'-DCMAKE_BUILD_TYPE=Release',", "'-DCMAKE_BUILD_TYPE=Debug',")
     source = replace_once(source, "'-Os',", "'-O1', '-g1', '-sASSERTIONS=2', '-sSTACK_OVERFLOW_CHECK=2', '-sSTACK_SIZE=1048576',")
     build_script.write_text(source)
     spec = importlib.util.spec_from_file_location("unicorn_build", build_script)
@@ -47,6 +46,10 @@ def build(source_root: Path, output: Path) -> None:
     os.chdir(source_root)
     spec.loader.exec_module(module)
     module.patchUnicorn()
+    # Full CONFIG_DEBUG_TCG has incomplete upstream context plumbing; enable interpreter assertions directly.
+    interpreter = source_root / "unicorn/qemu/tcg/tci.c"
+    interpreter.write_text(replace_once(interpreter.read_text(), "# define tci_assert(cond) ((void)0)",
+                                         "# define tci_assert(cond) assert(cond)"))
     module.generateConstants()
     module.compileUnicorn(["aarch64"])
     output.mkdir(parents=True, exist_ok=True)
@@ -57,7 +60,7 @@ def build(source_root: Path, output: Path) -> None:
         "sourceRevision": lock["sourceRevision"], "unicornRevision": lock["build"]["unicornRevision"],
         "emscriptenVersion": lock["build"]["emscriptenVersion"], "variant": "aarch64",
         "builderSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "buildType": "Debug", "cFlags": ["-DCONFIG_DEBUG_TCG"],
+        "buildType": "Debug", "cFlags": [],
         "linkFlags": ["-O1", "-g1", "ASSERTIONS=2", "STACK_OVERFLOW_CHECK=2", "STACK_SIZE=1048576"],
         "workers": 2, "fileSha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
         "fileBytes": runtime.stat().st_size, "purpose": "Synthetic compatibility diagnostics; not a gameplay performance build",
