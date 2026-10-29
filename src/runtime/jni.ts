@@ -21,6 +21,7 @@ const classMethods: Record<string, readonly string[]> = {
   "android/content/Intent": [
     "<init>(Ljava/lang/String;)V", "setFlags(I)Landroid/content/Intent;", "getFlags()I",
     "putExtra(Ljava/lang/String;I)Landroid/content/Intent;",
+    "putExtra(Ljava/lang/String;Ljava/lang/CharSequence;)Landroid/content/Intent;",
   ],
 };
 const symbol = (name: string, library: string): ElfSymbol => ({ name, type: 2, binding: 1, visibility: 0,
