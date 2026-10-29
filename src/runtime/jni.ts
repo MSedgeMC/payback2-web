@@ -83,7 +83,7 @@ export class JniEnvironment {
     const decode = (index: number): string => new TextDecoder("utf-8", { fatal: true })
       .decode(readCString(this.cpu, this.cpu.readRegister(`x${index}`), 256));
     const name = decode(2), descriptor = decode(3);
-    if (!classMethods[entry.name]?.includes(name + descriptor)) return false;
+    if (name.includes("(") || !descriptor.startsWith("(") || !classMethods[entry.name]?.includes(name + descriptor)) return false;
     let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name && method.descriptor === descriptor)?.[0];
     if (address === undefined) {
       if (this.methods.size >= 256) throw new RangeError("JNI method identifier limit exceeded");

@@ -120,6 +120,14 @@ test("JNI method lookup returns stable Float constructor identifiers and blocks 
     cpu.copyIn(data + 128n, new TextEncoder().encode("()F\0"));
     const accessor = session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]);
     assert.equal(accessor.status, "returned"); assert.notEqual(accessor.registers.x0, method.registers.x0);
+    cpu.copyIn(data + 64n, new TextEncoder().encode("<init>(F\0"));
+    cpu.copyIn(data + 128n, new TextEncoder().encode(")V\0"));
+    const table = cpu.copyOut(jni.vmAddress + 512n + 33n * 8n, 8), address = new DataView(table.buffer).getBigUint64(0, true);
+    cpu.writeRegister("x0", jni.environmentAddress); cpu.writeRegister("x1", global);
+    cpu.writeRegister("x2", data + 64n); cpu.writeRegister("x3", data + 128n); cpu.writeRegister("x30", 0x7fff0000n);
+    const malformed = cpu.run(address, 0x7fff0000n, 20);
+    assert.equal(session.imports.handleInterrupt(malformed.pc), false);
+    assert.equal(cpu.readRegister("pc"), malformed.pc); assert.equal(cpu.readRegister("x0"), jni.environmentAddress);
     cpu.copyIn(data + 64n, new TextEncoder().encode("<init>\0"));
     cpu.copyIn(data + 128n, new TextEncoder().encode("(I)V\0"));
     const unknown = session.call(entry, [jni.environmentAddress, global, data + 64n, data + 128n]);
