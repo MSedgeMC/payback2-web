@@ -137,7 +137,8 @@ function emitBlock(body: Code, block: Decoded[], context: {
         body.i64(instruction.value); body.set(instruction.rd); break;
       case "movk": {
         if (instruction.rd === 31) break;
-        const mask = ~((0xffffn << BigInt(instruction.shift)) & 0xffffffffffffffffn);
+        // The complement must be masked back into 64 bits or it exceeds the i64 range.
+        const mask = (~(0xffffn << BigInt(instruction.shift))) & 0xffffffffffffffffn;
         body.get(instruction.rd); body.i64(mask); body.raw(I64_AND);
         body.i64(instruction.value); body.raw(OP.or64); body.set(instruction.rd);
         break;
@@ -159,12 +160,29 @@ function emitBlock(body: Code, block: Decoded[], context: {
       case "andReg": case "orrReg": case "eorReg": {
         // Both operands must stay on the operand stack for the binary instruction.
         operand(instruction.rn, false);
-        operand(instruction.rm, false);
+        shifted(instruction.rm, instruction.shift, instruction.amount);
         body.raw(instruction.kind === "andReg" ? I64_AND : instruction.kind === "orrReg" ? OP.or64 : OP.xor64);
         body.set(T2);
         store(instruction.rd, false, instruction.width);
         if (instruction.kind === "andReg" && instruction.flags) emitLogicFlags(body, T2, instruction.width);
         break;
+      }
+      case "logicImm": {
+        operand(instruction.rn, false);
+        body.i64(instruction.value);
+        body.raw(instruction.operation === "and" ? I64_AND : instruction.operation === "orr" ? OP.or64 : OP.xor64);
+        body.set(T2);
+        store(instruction.rd, false, instruction.width);
+        if (instruction.flags) emitLogicFlags(body, T2, instruction.width);
+        break;
+      }
+      case "testBit": {
+        operand(instruction.register, false);
+        body.i64(BigInt(instruction.bit)); body.raw(I64_SHR_U); body.i64(1n); body.raw(I64_AND);
+        body.raw(OP.eqz64);
+        if (instruction.branchIfSet) body.raw(OP.eqz32);
+        body.ifThen(); jump(instruction.target, 1); body.end();
+        continue;
       }
       case "madd": {
         operand(instruction.rn, false); body.set(T0);
@@ -238,9 +256,19 @@ function emitBlock(body: Code, block: Decoded[], context: {
           if (instruction.indexWidth === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
           body.raw(OP.add64);
         }
-        body.raw(OP.wrapI64);
-        body.load(loadKind(instruction.size, instruction.signed), instruction.offset);
+        body.set(T3);
+        // Pre-index folds the offset into the base before the access.
+        if (instruction.writeback === "pre") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64); body.set(T3);
+          body.get(T3); body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        body.get(T3); body.raw(OP.wrapI64);
+        body.load(loadKind(instruction.size, instruction.signed), instruction.writeback === "pre" ? 0 : instruction.offset);
         body.set(instruction.rd);
+        if (instruction.writeback === "post") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+          body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
         break;
       }
       case "store": {
@@ -250,23 +278,39 @@ function emitBlock(body: Code, block: Decoded[], context: {
           if (instruction.indexWidth === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
           body.raw(OP.add64);
         }
-        body.raw(OP.wrapI64);
+        body.set(T3);
+        if (instruction.writeback === "pre") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64); body.set(T3);
+          body.get(T3); body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        body.get(T3); body.raw(OP.wrapI64);
         if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt);
-        body.store(storeKind(instruction.size), instruction.offset);
+        body.store(storeKind(instruction.size), instruction.writeback === "pre" ? 0 : instruction.offset);
+        if (instruction.writeback === "post") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+          body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
         break;
       }
       case "loadPair": case "storePair": {
-        operand(instruction.rn, true); body.raw(OP.wrapI64); body.set(T3);
+        const stride = instruction.size / 8;
+        operand(instruction.rn, true); body.set(T3);
+        const address = (extra: number): void => { body.get(T3); if (extra) { body.i64(BigInt(extra)); body.raw(OP.add64); } body.raw(OP.wrapI64); };
+        const kind = instruction.kind === "loadPair" && instruction.signed ? "i64_32s" as const
+          : instruction.size === 64 ? "i64" as const : "i64_32u" as const;
         if (instruction.kind === "loadPair") {
-          if (instruction.rt !== 31) { body.get(T3); body.load("i64", instruction.offset); body.set(instruction.rt); }
-          if (instruction.rt2 !== 31) { body.get(T3); body.load("i64", instruction.offset + 8); body.set(instruction.rt2); }
+          if (instruction.rt !== 31) { address(instruction.offset); body.load(kind, 0); body.set(instruction.rt); }
+          if (instruction.rt2 !== 31) { address(instruction.offset + stride); body.load(kind, 0); body.set(instruction.rt2); }
         } else {
-          body.get(T3); if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt); body.store("i64", instruction.offset);
-          body.get(T3); if (instruction.rt2 === 31) body.i64(0n); else body.get(instruction.rt2); body.store("i64", instruction.offset + 8);
+          address(instruction.offset); if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt);
+          body.store(instruction.size === 64 ? "i64" : "i64_32", 0);
+          address(instruction.offset + stride); if (instruction.rt2 === 31) body.i64(0n); else body.get(instruction.rt2);
+          body.store(instruction.size === 64 ? "i64" : "i64_32", 0);
         }
         if (instruction.writeback !== "none") {
+          const adjustment = instruction.writeback === "post" ? instruction.offset : instruction.offset;
           body.get(instruction.rn === 31 ? SP : instruction.rn);
-          body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+          body.i64(BigInt(adjustment)); body.raw(OP.add64);
           body.set(instruction.rn === 31 ? SP : instruction.rn);
         }
         break;
@@ -287,9 +331,12 @@ function emitBlock(body: Code, block: Decoded[], context: {
 function emitCondition(body: Code, condition: Condition): void {
   const bitSet = (bit: bigint): void => { body.get(FLAGS); body.i64(bit); body.raw(I64_AND); body.raw(OP.eqz64); body.raw(OP.eqz32); };
   const bitClear = (bit: bigint): void => { body.get(FLAGS); body.i64(bit); body.raw(I64_AND); body.raw(OP.eqz64); };
+  // V sits at bit 28, so each flag must be masked to one bit before comparing N with V.
   const flagEquals = (): void => {
-    body.get(FLAGS); body.i64(FLAG_N); body.raw(I64_SHR_U);
-    body.get(FLAGS); body.i64(FLAG_V); body.raw(I64_SHR_U); body.raw(OP.eq64);
+    const bit = (shift: bigint): void => {
+      body.get(FLAGS); body.i64(shift); body.raw(I64_SHR_U); body.i64(1n); body.raw(I64_AND);
+    };
+    bit(31n); bit(28n); body.raw(OP.eq64);
   };
   switch (condition) {
     case "al": body.i64(1n); body.raw(OP.wrapI64); return;

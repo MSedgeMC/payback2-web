@@ -38,7 +38,9 @@ export class Code {
 
   raw(...values: number[]): this { this.bytes.push(...values); return this; }
   u32(value: number): this { this.bytes.push(...uleb(value)); return this; }
-  i64(value: bigint): this { this.bytes.push(0x42, ...sleb(value)); return this; }
+  // i64.const is a signed LEB128, so a 64-bit pattern with the top bit set must be
+  // encoded as the equivalent negative value or the varint grows past 64 bits.
+  i64(value: bigint): this { this.bytes.push(0x42, ...sleb(BigInt.asIntN(64, value))); return this; }
   i32(value: number): this { this.bytes.push(0x41, ...sleb(BigInt(value))); return this; }
   op(code: number): this { this.bytes.push(code); return this; }
   get(index: number): this { this.bytes.push(0x20, ...uleb(index)); return this; }

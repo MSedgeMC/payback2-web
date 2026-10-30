@@ -64,15 +64,24 @@ function translated(): { elapsedMs: number; hash: bigint } {
   return { elapsedMs, hash: view.getBigUint64(13 * 8, true) };
 }
 
-// Coverage over a contiguous slice of the dependency's text.
-function coverage(start: number, length: number): { instructions: number; supported: number; percent: number } {
-  let supported = 0, total = 0;
+// Coverage over a contiguous slice of the dependency's text. `udf` and undecodable words are
+// data and padding inside .text rather than code, so they are reported separately.
+function coverage(start: number, length: number): { words: number; code: number; supported: number; percentOfCode: number } {
+  let supported = 0, code = 0, words = 0;
   const view = new DataView(library.buffer, library.byteOffset, library.byteLength);
   for (let address = start; address + 4 <= start + length; address += 4) {
-    total++;
-    try { decode(address, view.getUint32(address, true)); supported++; } catch { /* counted as unsupported */ }
+    words++;
+    const word = view.getUint32(address, true);
+    if (word === 0 || word === 0xd503201f) continue;
+    try { decode(address, word); supported++; code++; }
+    catch { if (!isUdf(word)) code++; }
   }
-  return { instructions: total, supported, percent: Math.round(supported / total * 1000) / 10 };
+  return { words, code, supported, percentOfCode: Math.round(supported / code * 1000) / 10 };
+}
+
+/** `udf #imm16` (0x0000xxxx) is padding or a trap placeholder, not executable code. */
+function isUdf(word: number): boolean {
+  return ((word & 0xffff0000) >>> 0) === 0;
 }
 
 const slow = await interpreted(), fast = translated();
