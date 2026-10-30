@@ -14,6 +14,7 @@ const sourcePatterns = [
   /^tests\/[a-zA-Z0-9_./-]+\.(?:ts|py|mjs)$/,
   /^public\/licenses\/(?:GPL-2\.0|ZIP-JS)\.txt$/,
   /^\.github\/workflows\/[a-zA-Z0-9_-]+\.yml$/,
+  /^docs\/PERFORMANCE\.md$/, // measured runtime throughput quoted by the readme
 ];
 const distPatterns = [/^index\.html$/, /^assets\/[a-zA-Z0-9_.-]+\.(?:js|css)$/,
                       /^licenses\/(?:GPL-2\.0|ZIP-JS)\.txt$/];
