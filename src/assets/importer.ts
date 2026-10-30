@@ -38,10 +38,14 @@ async function inspectDirectoryBounds(blob: Blob): Promise<number> {
 
 export class BoundedZip {
   readonly entries: readonly Entry[];
+  /** Compressed archive size, as a read-only file would report it. */
+  readonly byteLength: number;
   private readonly reader: ZipReader<Blob>;
   private closed = false;
 
-  private constructor(reader: ZipReader<Blob>, entries: Entry[]) { this.reader = reader; this.entries = entries; }
+  private constructor(reader: ZipReader<Blob>, entries: Entry[], byteLength: number) {
+    this.reader = reader; this.entries = entries; this.byteLength = byteLength;
+  }
 
   static async open(blob: Blob): Promise<BoundedZip> {
     const expectedCount = await inspectDirectoryBounds(blob);
@@ -63,7 +67,7 @@ export class BoundedZip {
         total += entry.uncompressedSize;
         if (total > MAX_EXPANDED_BYTES) throw new Error("ZIP expanded-size budget exceeded");
       }
-      return new BoundedZip(reader, entries);
+      return new BoundedZip(reader, entries, blob.size);
     } catch (error) { await reader.close(); throw error; }
   }
 

@@ -13,6 +13,7 @@ export type NativeCallProbe = {
   wasmMemoryBytes: number;
   last: ExecutionResult;
   blockedSymbol?: string;
+  blockedDetail?: string;
   blockedLibrary?: string;
   registers: { x0: bigint; x1: bigint; x2: bigint; x8: bigint; x30: bigint; sp: bigint };
 };
@@ -201,7 +202,7 @@ export class NativeSession {
     let sliceCount = 0, completedCalls = 0;
     let last: ExecutionResult = { reason: "end", pc: sentinel, elapsedMs: 0 };
     let status: NativeCallProbe["status"] = "returned";
-    let blockedSymbol: string | undefined, blockedLibrary: string | undefined;
+    let blockedSymbol: string | undefined, blockedLibrary: string | undefined, blockedDetail: string | undefined;
     for (const initializer of addresses) {
       if (sliceCount >= limits.slices || performance.now() - started >= limits.milliseconds) {
         status = "budget";
@@ -241,6 +242,7 @@ export class NativeSession {
         const entry = imports.atInterrupt(last.pc);
         status = entry ? "blocked-import" : "blocked-interrupt";
         blockedSymbol = entry?.symbol.name ?? imports.unsupportedSyscall; blockedLibrary = entry?.symbol.version?.library;
+        blockedDetail = imports.unsupportedDetail;
         break;
       }
       if (last.reason === "fault") { status = "fault"; break; }
@@ -252,6 +254,7 @@ export class NativeSession {
       sliceCount, instructionBudget: limits.slices * limits.instructionsPerSlice, elapsedMs: performance.now() - started,
       wasmMemoryBytes: cpu.wasmMemoryBytes, last,
       ...(blockedSymbol ? { blockedSymbol } : {}), ...(blockedLibrary ? { blockedLibrary } : {}),
+      ...(blockedDetail ? { blockedDetail } : {}),
       registers: { x0: cpu.readRegister("x0"), x1: cpu.readRegister("x1"), x2: cpu.readRegister("x2"),
                    x8: cpu.readRegister("x8"), x30: cpu.readRegister("x30"), sp: cpu.readRegister("sp") },
     };

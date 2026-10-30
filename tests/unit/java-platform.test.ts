@@ -82,3 +82,42 @@ test("bad asset CRC becomes a Java IOException without changing the stream desti
     assert.deepEqual(target.bytes, new Uint8Array([7, 7, 7]));
   } finally { java.dispose(); await archive.close(); }
 });
+
+test("java.io.File models the read-only package file system and refuses to fake writes", async () => {
+  const archive = await BoundedZip.open(syntheticZip([{ name: "AndroidManifest.xml", bytes: new Uint8Array([1]) }]));
+  const java = new JavaMachine(readDex(syntheticManagedDex()), () => {}, machine => new JavaPlatform(machine, archive, () => false));
+  try {
+    const open = (path: string): JavaValue => {
+      const file = instance(java, "java/io/File");
+      assert.equal(call(java, "java/io/File", "<init>", "(Ljava/lang/String;)V", [file, java.stringValue(path)], "direct").next().done, true);
+      return file;
+    };
+    const text = async (file: JavaValue, name: string): Promise<string | null> => {
+      const value = await finish(call(java, "java/io/File", name, "()Ljava/lang/String;", [file], "virtual"));
+      const object = java.object(value); return object?.kind === "string" ? object.value : null;
+    };
+    const packageFile = open(BASE_APK_PATH);
+    assert.equal(await text(packageFile, "getPath"), BASE_APK_PATH);
+    assert.equal(await text(packageFile, "getName"), "base.apk");
+    assert.equal(await text(packageFile, "getParent"), "/app");
+    assert.equal(await finish(call(java, "java/io/File", "exists", "()Z", [packageFile], "virtual")), 1);
+    assert.equal(await finish(call(java, "java/io/File", "isFile", "()Z", [packageFile], "virtual")), 1);
+    assert.equal(await finish(call(java, "java/io/File", "length", "()J", [packageFile], "virtual")), BigInt(archive.byteLength));
+    const directory = open("/app");
+    assert.equal(await finish(call(java, "java/io/File", "isDirectory", "()Z", [directory], "virtual")), 1);
+    assert.equal(await finish(call(java, "java/io/File", "isFile", "()Z", [directory], "virtual")), 0);
+    const missing = open("/data/data/net.apex_designs.payback2/files/save");
+    assert.equal(await finish(call(java, "java/io/File", "exists", "()Z", [missing], "virtual")), 0);
+    assert.equal(await finish(call(java, "java/io/File", "length", "()J", [missing], "virtual")), 0n);
+    // The guest file system is read-only user data, so mutations report failure honestly.
+    assert.equal(await finish(call(java, "java/io/File", "delete", "()Z", [packageFile], "virtual")), 0);
+    assert.equal(await finish(call(java, "java/io/File", "mkdirs", "()Z", [missing], "virtual")), 0);
+    assert.equal(await finish(call(java, "java/io/File", "equals", "(Ljava/lang/Object;)Z", [packageFile, open(BASE_APK_PATH)], "virtual")), 1);
+    assert.equal(await finish(call(java, "java/io/File", "equals", "(Ljava/lang/Object;)Z", [packageFile, missing], "virtual")), 0);
+    assert.throws(() => call(java, "java/io/File", "<init>", "(Ljava/lang/String;)V", [instance(java, "java/io/File"), java.stringValue("relative/path")], "direct").next(),
+      thrown("java/lang/IllegalArgumentException"));
+    assert.throws(() => call(java, "java/io/File", "exists", "()Z", [instance(java, "java/io/File")], "virtual").next(), /Invalid java\.io\.File receiver/);
+    assert.equal(new JavaPlatform(java, archive, () => false).hasMethod("java/io/File", "exists", "()Z"), true);
+    assert.equal(new JavaPlatform(java, archive, () => false).hasMethod("java/io/File", "listFiles", "()[Ljava/io/File;"), false);
+  } finally { java.dispose(); await archive.close(); }
+});

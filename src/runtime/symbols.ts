@@ -41,6 +41,7 @@ export class NativeImports {
   private heap: GuestHeap | undefined;
   private readonly syscalls: GuestSyscalls;
   private readonly handlers = new Map<bigint, () => NativeDispatch>();
+  private detail: string | undefined;
   private disposed = false;
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
@@ -92,12 +93,19 @@ export class NativeImports {
   /** Name of the last raw guest syscall without an implementation, if any. */
   get unsupportedSyscall(): string | undefined { return this.syscalls.unsupportedSyscall; }
 
+  /** Why the last dispatched import was refused, for bounded diagnostics. */
+  get unsupportedDetail(): string | undefined { return this.detail ?? this.syscalls.unsupportedSyscall; }
+
+  /** Records the concrete input that a handler could not serve. */
+  explain(detail: string): void { this.detail = detail.slice(0, 200); }
+
   atInterrupt(pc: bigint): NativeImport | undefined {
     return this.entries.find(entry => entry.kind === "function" && entry.address + 4n === pc);
   }
 
   handleInterrupt(pc: bigint): boolean | NativeWait {
     const entry = this.atInterrupt(pc), symbol = entry?.symbol;
+    this.detail = undefined;
     const handler = entry && this.handlers.get(entry.address);
     if (handler) return this.dispatch(handler());
     if (entry && entry.address === this.callbackReturnAddress) {
@@ -109,14 +117,18 @@ export class NativeImports {
       return this.dispatch(frame.onReturn?.(this.cpu.readRegister("x0")));
     }
     if (!entry) return this.dispatch(this.syscalls.handle(pc));
-    if (symbol?.version?.library === "libm.so") {
+    if (!symbol) return false;
+    if (symbol.version?.library === "libm.so") {
       const math = libmHandler(symbol.name);
-      if (!math) return false;
+      if (!math) { this.explain(`libm ${symbol.name}`); return false; }
       math(this.cpu);
       this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
       return true;
     }
-    if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
+    if (symbol.version?.library !== "libc.so" || symbol.version.name !== "LIBC") {
+      this.explain(`${symbol.version?.library ?? "unknown"}:${symbol.version?.name ?? "unversioned"} ${symbol.name}`);
+      return false;
+    }
     if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
     else if (symbol.name === "malloc" || symbol.name === "calloc") {
       this.heap ??= new GuestHeap(this.cpu);

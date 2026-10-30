@@ -21,7 +21,3 @@ export function readVariadicWords(cpu: RuntimeAdapter, pointer: bigint, count: n
   }
   return values;
 }
-
-export function readVariadicLong(cpu: RuntimeAdapter, pointer: bigint): bigint {
-  return BigInt.asIntN(64, readVariadicWords(cpu, pointer, 1)[0]!);
-}

@@ -4,7 +4,7 @@ import type { DexFile, JavaClass } from "./dex.ts";
 import type { BoundedZip } from "../assets/importer.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { decodeModifiedUtf8, MAX_MODIFIED_UTF8_BYTES } from "./modified-utf8.ts";
-import { readVariadicLong, readVariadicWords } from "./aarch64-varargs.ts";
+import { readVariadicWords } from "./aarch64-varargs.ts";
 import type { NativeDispatch, NativeImports } from "./symbols.ts";
 import type { JavaDatum, JavaExecution, JavaRequest, JavaValue } from "./java-values.ts";
 import { parseJavaMethod } from "./java-descriptors.ts";
@@ -14,7 +14,7 @@ import { JavaPlatform } from "./java-platform.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 30: "NewObjectA", 33: "GetMethodID", 35: "CallObjectMethodV", 38: "CallBooleanMethodV", 50: "CallIntMethodV", 53: "CallLongMethodV", 62: "CallVoidMethodV", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -58,6 +58,7 @@ export class JniEnvironment {
   readonly vmAddress = 0x72000000n;
   readonly environmentAddress = this.vmAddress + 8n;
   private readonly cpu: RuntimeAdapter;
+  private readonly imports: NativeImports;
   private readonly threadPointer: bigint;
   private readonly references = new Map<bigint, { value: JavaValue; global: boolean }>();
   private readonly localFrames: Set<bigint>[] = [new Set()];
@@ -72,7 +73,7 @@ export class JniEnvironment {
   private java: JavaMachine | undefined;
 
   constructor(cpu: RuntimeAdapter, imports: NativeImports) {
-    this.cpu = cpu; this.threadPointer = cpu.readRegister("tpidr_el0");
+    this.cpu = cpu; this.imports = imports; this.threadPointer = cpu.readRegister("tpidr_el0");
     try {
       cpu.map(this.vmAddress, 4096n, 3); this.mapped = true;
       const bytes = new Uint8Array(4096), view = new DataView(bytes.buffer);
@@ -93,8 +94,14 @@ export class JniEnvironment {
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
         29: () => this.newObjectV(),
+        30: () => this.newObjectA(),
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
+        35: () => this.callMethodV("object"),
+        38: () => this.callMethodV("boolean"),
+        50: () => this.callMethodV("int"),
+        53: () => this.callMethodV("long"),
+        62: () => this.callMethodV("void"),
         115: () => this.callStaticObjectMethodV(),
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
@@ -142,7 +149,10 @@ export class JniEnvironment {
   private findClass(): boolean {
     this.assertEnvironment();
     const name = this.argumentString(1);
-    if (!Object.hasOwn(classMethods, name) && !this.classes.has(name) && !this.java?.hasClass(name)) return false;
+    if (!Object.hasOwn(classMethods, name) && !this.classes.has(name) && !this.java?.hasClass(name)) {
+      this.imports.explain(`class ${name}`);
+      return false;
+    }
     this.cpu.writeRegister("x0", this.addReference(this.java?.classValue(name) ?? { kind: "class", name }, false));
     return true;
   }
@@ -156,10 +166,14 @@ export class JniEnvironment {
     const entry = this.classReference(this.cpu.readRegister("x1"));
     const name = this.argumentString(2), descriptor = this.argumentString(3);
     const definitions = isStatic ? staticMethods : classMethods;
-    const builtin = Object.hasOwn(definitions, entry.name) && definitions[entry.name]!.includes(name + descriptor);
+    const builtin = Object.hasOwn(definitions, entry.name) && definitions[entry.name]!.includes(name + descriptor) ||
+      (!isStatic && (this.java?.hasHostMethod(entry.name, name, descriptor) ?? false));
     const definitions_ = this.classes.get(entry.name) ?? this.java?.sourceClass(entry.name);
     const declared = definitions_?.methods.find(method => method.name === name && method.descriptor === descriptor && method.isStatic === isStatic);
-    if (name.includes("(") || !descriptor.startsWith("(") || !builtin && !declared) return false;
+    if (name.includes("(") || !descriptor.startsWith("(") || !builtin && !declared) {
+      this.imports.explain(`method ${entry.name}.${name}${descriptor}`);
+      return false;
+    }
     let address = [...this.methods].find(([, method]) => method.className === entry.name && method.name === name &&
       method.descriptor === descriptor && method.isStatic === isStatic)?.[0];
     if (address === undefined) {
@@ -266,15 +280,54 @@ export class JniEnvironment {
     writeGuestBytes(this.cpu, this.cpu.readRegister("x4"), array.bytes.subarray(start, start + length));
   }
 
-  private newObjectV(): boolean {
+  private newObjectV(): NativeDispatch {
     this.assertEnvironment();
-    const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
-    if (!method || method.className !== clazz.name || method.name !== "<init>" || method.isStatic) throw new RangeError("Invalid JNI constructor identifier");
-    // shortcut: observed Long constructor only; add other constructors with their actual argument ABI.
-    if (clazz.name !== "java/lang/Long" || method.descriptor !== "(J)V") return false;
-    const value = readVariadicLong(this.cpu, this.cpu.readRegister("x3"));
-    this.cpu.writeRegister("x0", this.allocateReference({ kind: "boxed-long", value }, 72));
-    return true;
+    const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.constructorMethod(clazz.name);
+    const signature = parseJavaMethod(method.descriptor);
+    if (signature.parameters.some(type => type === "F" || type === "D")) return false;
+    return this.construct(clazz.name, method, readVariadicWords(this.cpu, this.cpu.readRegister("x3"), signature.parameters.length), signature);
+  }
+
+  private newObjectA(): NativeDispatch {
+    this.assertEnvironment();
+    const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.constructorMethod(clazz.name);
+    const signature = parseJavaMethod(method.descriptor);
+    return this.construct(clazz.name, method, this.readJValues(this.cpu.readRegister("x3"), signature.parameters.length), signature);
+  }
+
+  private constructorMethod(className: string): JavaMethod {
+    const method = this.methods.get(this.cpu.readRegister("x2"));
+    if (!method || method.className !== className || method.name !== "<init>" || method.isStatic) {
+      throw new RangeError("Invalid JNI constructor identifier");
+    }
+    return method;
+  }
+
+  /** Decodes a `const jvalue*` array; each jvalue occupies eight bytes on AArch64. */
+  private readJValues(address: bigint, count: number): bigint[] {
+    const bytes = readGuestBytes(this.cpu, address, count * 8), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return Array.from({ length: count }, (_, index) => view.getBigUint64(index * 8, true));
+  }
+
+  private construct(className: string, method: JavaMethod, words: readonly bigint[], signature: ReturnType<typeof parseJavaMethod>): NativeDispatch {
+    // shortcut: boxed Long keeps its dedicated value kind; route every other constructor through the managed environment.
+    if (className === "java/lang/Long" && signature.parameters.length === 1 && signature.parameters[0] === "J") {
+      this.cpu.writeRegister("x0", this.allocateReference({ kind: "boxed-long", value: BigInt.asIntN(64, words[0]!) }, 72));
+      return true;
+    }
+    if (!this.java) return false;
+    const args = signature.parameters.map((type, index): JavaDatum => {
+      const word = words[index]!;
+      if (type.startsWith("L") || type.startsWith("[")) return this.referenceValue(word);
+      if (type === "J") return BigInt.asIntN(64, word);
+      if ("ZBCSI".includes(type)) return Number(BigInt.asIntN(32, word));
+      throw new Error(`Unsupported JNI constructor argument type ${type}`);
+    });
+    const object: JavaValue = this.java.make({ kind: "instance", className, fields: new Map<string, JavaDatum>() }, 64);
+    const reference = { className, name: "<init>", descriptor: method.descriptor };
+    return this.runJava(this.java.invoke(reference, [object, ...args], "direct"), () => {
+      this.cpu.writeRegister("x0", this.addReference(object, false));
+    });
   }
 
   private getObjectArrayElement(): void {
@@ -328,6 +381,35 @@ export class JniEnvironment {
     });
     return this.runJava(this.java.invoke(method, args), value => {
       const object = this.java!.object(value); this.cpu.writeRegister("x0", object ? this.addReference(object, false) : 0n);
+    });
+  }
+
+  private callMethodV(result: "object" | "boolean" | "int" | "long" | "void"): NativeDispatch {
+    this.assertEnvironment();
+    const receiver = this.referenceValue(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
+    if (!method || method.isStatic) throw new RangeError("Invalid JNI instance method identifier");
+    if (!receiver) throw new RangeError("JNI instance call requires a receiver object");
+    const signature = parseJavaMethod(method.descriptor);
+    const matches = result === "object" ? signature.result.startsWith("L") || signature.result.startsWith("[")
+      : signature.result === { boolean: "Z", int: "I", long: "J", void: "V" }[result];
+    if (!matches) throw new RangeError(`JNI ${result} call disagrees with ${method.descriptor}`);
+    if (signature.parameters.some(type => type === "F" || type === "D")) return false;
+    if (!this.java) return false;
+    const words = readVariadicWords(this.cpu, this.cpu.readRegister("x3"), signature.parameters.length);
+    const args = signature.parameters.map((type, index): JavaDatum => {
+      const word = words[index]!;
+      if (type.startsWith("L") || type.startsWith("[")) return this.referenceValue(word);
+      if (type === "J") return BigInt.asIntN(64, word);
+      if ("ZBCSI".includes(type)) return Number(BigInt.asIntN(32, word));
+      throw new Error(`Unsupported JNI instance argument type ${type}`);
+    });
+    const reference = { className: method.className, name: method.name, descriptor: method.descriptor };
+    return this.runJava(this.java.invoke(reference, [receiver, ...args], "virtual"), value => {
+      if (result === "void") this.cpu.writeRegister("x0", 0n);
+      else if (result === "object") {
+        const object = this.java!.object(value); this.cpu.writeRegister("x0", object ? this.addReference(object, false) : 0n);
+      } else if (result === "long") this.cpu.writeRegister("x0", BigInt.asUintN(64, value as bigint));
+      else this.cpu.writeRegister("x0", BigInt.asUintN(32, BigInt(this.java!.integer(value))));
     });
   }
 

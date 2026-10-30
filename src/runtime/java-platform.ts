@@ -10,11 +10,15 @@ const classes = new Set(["java/lang/Object", "java/lang/Class", "java/lang/Strin
   "java/lang/ClassNotFoundException", "java/io/IOException", "java/io/FileNotFoundException", "java/lang/NullPointerException",
   "java/lang/IndexOutOfBoundsException", "java/lang/StringIndexOutOfBoundsException", "java/lang/ArrayIndexOutOfBoundsException",
   "java/lang/NegativeArraySizeException", "java/lang/ArithmeticException", "java/lang/ClassCastException",
-  "java/lang/IllegalMonitorStateException", "java/lang/UnsatisfiedLinkError", "android/content/Context"]);
+  "java/lang/IllegalMonitorStateException", "java/lang/UnsatisfiedLinkError", "android/content/Context",
+  "java/io/File"]);
+// The browser port exposes the user's package as one read-only file. Nothing else exists on
+// the guest file system, so missing paths report honestly instead of pretending to be writable.
+const VIRTUAL_APP_DIRECTORY = "/app";
 type ZipState = { kind: "zip"; closed: boolean; streams: Set<StreamState> };
 type StreamState = { kind: "stream"; file: ZipState; name: string; size: number; closed: boolean; position: number; bytes?: Uint8Array };
 type HostState = ZipState | StreamState | { kind: "entry"; file: ZipState; name: string; size: number }
-  | { kind: "builder"; value: string } | { kind: "url"; value: string };
+  | { kind: "builder"; value: string } | { kind: "url"; value: string } | { kind: "file"; path: string };
 
 export class JavaPlatform implements JavaHostCalls {
   private readonly machine: JavaMachine;
@@ -28,6 +32,84 @@ export class JavaPlatform implements JavaHostCalls {
   }
 
   hasClass(name: string): boolean { return classes.has(name); }
+
+  /** Methods this platform implements, keyed as `name+descriptor` per class. */
+  private static readonly hostMethods: Record<string, readonly string[]> = {
+    "java/io/File": ["<init>(Ljava/lang/String;)V", "getPath()Ljava/lang/String;", "toString()Ljava/lang/String;",
+      "getAbsolutePath()Ljava/lang/String;", "getCanonicalPath()Ljava/lang/String;", "getName()Ljava/lang/String;",
+      "getParent()Ljava/lang/String;", "exists()Z", "isFile()Z", "isDirectory()Z", "length()J", "equals(Ljava/lang/Object;)Z",
+      "hashCode()I", "delete()Z", "mkdir()Z", "mkdirs()Z", "createNewFile()Z", "renameTo(Ljava/io/File;)Z", "setLastModified(J)Z"],
+  };
+
+  hasMethod(className: string, name: string, descriptor: string): boolean {
+    return JavaPlatform.hostMethods[className]?.includes(name + descriptor) ?? false;
+  }
+
+  /** Path of an existing or prospective entry in the virtual file system. */
+  private filePath(value: JavaDatum): string {
+    const object = this.machine.object(value);
+    if (!object) this.machine.raise("java/lang/NullPointerException", "Null java.io.File");
+    const state = this.states.get(object);
+    if (state?.kind !== "file") throw new Error("Invalid java.io.File receiver");
+    return state.path;
+  }
+
+  private fileExists(path: string): boolean {
+    return path === "/" || path === VIRTUAL_APP_DIRECTORY || this.fileLength(path) !== undefined;
+  }
+
+  private fileLength(path: string): number | undefined {
+    return path === BASE_APK_PATH ? this.base?.byteLength : undefined;
+  }
+
+  private file(method: DexMethodReference, args: JavaDatum[]): JavaDatum {
+    const key = `java/io/File.${method.name}${method.descriptor}`;
+    if (key === "java/io/File.<init>(Ljava/lang/String;)V") {
+      const receiver = this.machine.object(args[0]!);
+      if (receiver?.kind !== "instance" || receiver.className !== "java/io/File") throw new Error("Invalid java.io.File construction");
+      const path = this.text(args[1]!);
+      if (!path.startsWith("/") || path.length > 4096 || path.includes("\0") || path.split("/").includes("..")) {
+        this.machine.raise("java/lang/IllegalArgumentException", "Unsupported guest file path");
+      }
+      this.states.set(receiver, { kind: "file", path: path.length > 1 ? path.replace(/\/+$/, "") : path });
+      return null;
+    }
+    const path = this.filePath(args[0]!);
+    if (key === "java/io/File.getPath()Ljava/lang/String;" || key === "java/io/File.toString()Ljava/lang/String;") {
+      return this.machine.stringValue(path);
+    }
+    // The virtual file system has no relative roots, so absolute and canonical paths are equal.
+    if (key === "java/io/File.getAbsolutePath()Ljava/lang/String;" || key === "java/io/File.getCanonicalPath()Ljava/lang/String;") {
+      return this.machine.stringValue(path);
+    }
+    if (key === "java/io/File.getName()Ljava/lang/String;") {
+      const slash = path.lastIndexOf("/");
+      return this.machine.stringValue(path.slice(slash + 1));
+    }
+    if (key === "java/io/File.getParent()Ljava/lang/String;") {
+      const slash = path.lastIndexOf("/");
+      if (slash < 0) return null;
+      return this.machine.stringValue(slash === 0 ? "/" : path.slice(0, slash));
+    }
+    if (key === "java/io/File.exists()Z") return this.fileExists(path) ? 1 : 0;
+    if (key === "java/io/File.isFile()Z") return this.fileLength(path) === undefined ? 0 : 1;
+    if (key === "java/io/File.isDirectory()Z") return path === "/" || path === VIRTUAL_APP_DIRECTORY ? 1 : 0;
+    if (key === "java/io/File.length()J") return BigInt(this.fileLength(path) ?? 0);
+    if (key === "java/io/File.equals(Ljava/lang/Object;)Z") {
+      const other = this.machine.object(args[1]!);
+      if (other?.kind !== "instance" || this.states.get(other)?.kind !== "file") return 0;
+      return this.filePath(other) === path ? 1 : 0;
+    }
+    if (key === "java/io/File.hashCode()I") {
+      let hash = 0;
+      for (const character of path) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) | 0;
+      return hash;
+    }
+    // shortcut: the guest file system is read-only user data; mutation reports failure rather than faking a write.
+    if (["java/io/File.delete()Z", "java/io/File.mkdir()Z", "java/io/File.mkdirs()Z", "java/io/File.createNewFile()Z",
+         "java/io/File.renameTo(Ljava/io/File;)Z", "java/io/File.setLastModified(J)Z"].includes(key)) return 0;
+    throw new Error(`Unsupported java.io.File call ${method.name}${method.descriptor}`);
+  }
 
   private text(value: JavaDatum): string {
     const object = this.machine.object(value);
@@ -55,6 +137,7 @@ export class JavaPlatform implements JavaHostCalls {
   *invoke(method: DexMethodReference, args: JavaDatum[]): JavaExecution {
     this.machine.assertActive();
     const key = `${method.className}.${method.name}${method.descriptor}`;
+    if (method.className === "java/io/File") return this.file(method, args);
     if (key === "java/lang/Object.<init>()V") return null;
     if (key === "java/lang/System.currentTimeMillis()J") return BigInt(Date.now());
     if (key === "java/lang/System.loadLibrary(Ljava/lang/String;)V") {

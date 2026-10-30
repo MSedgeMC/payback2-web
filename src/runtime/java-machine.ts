@@ -4,7 +4,8 @@ import { javaTypeWords, parseJavaMethod } from "./java-descriptors.ts";
 import type { JavaDatum, JavaExecution, JavaValue } from "./java-values.ts";
 import { javaClassName, JavaThrown } from "./java-values.ts";
 
-export type JavaHostCalls = { hasClass(name: string): boolean; invoke(method: DexMethodReference, args: JavaDatum[]): JavaExecution; dispose(): void };
+export type JavaHostCalls = { hasClass(name: string): boolean; hasMethod(className: string, name: string, descriptor: string): boolean;
+  invoke(method: DexMethodReference, args: JavaDatum[]): JavaExecution; dispose(): void };
 const fieldKey = (field: DexFieldReference): string => `${field.className}\0${field.name}\0${field.descriptor}`;
 const wideTail = Symbol("wide register tail");
 const exceptionParents: Record<string, string> = {
@@ -55,6 +56,9 @@ export class JavaMachine {
   }
 
   hasClass(name: string): boolean { return !!this.sourceClass(name) || !!this.host?.hasClass(name); }
+  hasHostMethod(className: string, name: string, descriptor: string): boolean {
+    return this.host?.hasMethod(className, name, descriptor) ?? false;
+  }
 
   make<T extends JavaValue>(value: T, bytes: number): T {
     this.accountBytes(bytes); return value;

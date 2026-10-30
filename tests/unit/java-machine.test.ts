@@ -10,7 +10,7 @@ import { syntheticManagedDex } from "../fixtures/dex.ts";
 const method = { className: "example/Runner", name: "execute", descriptor: "([B)Ljava/lang/Object;" };
 const input = (): JavaValue => ({ kind: "byte-array", bytes: new Uint8Array([0]) });
 function machine(bytes: Uint8Array): JavaMachine {
-  return new JavaMachine(readDex(bytes), () => {}, () => ({ hasClass: name => name === "java/lang/Object",
+  return new JavaMachine(readDex(bytes), () => {}, () => ({ hasClass: name => name === "java/lang/Object", hasMethod: () => false,
     *invoke(reference) { throw new Error(`Unsupported Java call ${reference.name}`); }, dispose() {} }));
 }
 
@@ -35,7 +35,7 @@ test("managed integer overflow, unsigned shifts, byte writes, and signed long wr
   finally { java.dispose(); }
   const dex = readDex(syntheticManagedDex([0x0016, 0xffff, 0x02bb, 0x0210])), definition = dex.readClass(method.className).methods[0]!;
   definition.descriptor = "(J)J"; definition.code!.registers = 4; definition.code!.inputs = 2;
-  const wide = new JavaMachine(dex, () => {}, () => ({ hasClass: name => name === "java/lang/Object", *invoke() { throw new Error("unexpected call"); }, dispose() {} }));
+  const wide = new JavaMachine(dex, () => {}, () => ({ hasClass: name => name === "java/lang/Object", hasMethod: () => false, *invoke() { throw new Error("unexpected call"); }, dispose() {} }));
   try {
     assert.equal(wide.invoke({ ...method, descriptor: "(J)J" }, [-0x8000000000000000n]).next().value, 0x7fffffffffffffffn);
     assert.equal(wide.invoke({ ...method, descriptor: "(J)J" }, [0x7fffffffffffffffn]).next().value, 0x7ffffffffffffffen);
