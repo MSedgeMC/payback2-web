@@ -16,6 +16,7 @@ __pycache__/
 
 
 AGENTS.md
-docs/
+docs/*
+!docs/PERFORMANCE.md
 test-results/
 playwright-report/
