@@ -62,6 +62,19 @@ export class Code {
   drop(): this { this.bytes.push(0x1a); return this; }
   ret(): this { this.bytes.push(0x0f); return this; }
   f64(value: number): this { this.bytes.push(0x44); for (const byte of new Uint8Array(new Float64Array([value]).buffer)) this.bytes.push(byte); return this; }
+  /** SIMD instruction: 0xfd prefix followed by an unsigned opcode and optional immediates. */
+  simd(opcode: number, immediate?: readonly number[]): this {
+    this.bytes.push(0xfd, ...uleb(opcode));
+    if (immediate) this.bytes.push(...immediate);
+    return this;
+  }
+  /** SIMD lane index immediates are single bytes. */
+  simdLane(opcode: number, lane: number): this { return this.simd(opcode, [lane]); }
+  v128(value: bigint): this {
+    this.bytes.push(0xfd, ...uleb(0x0c));
+    for (let index = 0; index < 16; index++) this.bytes.push(Number((value >> BigInt(index * 8)) & 0xffn));
+    return this;
+  }
   getF(index: number): this { this.bytes.push(0x20, ...uleb(index)); return this; }
   setF(index: number): this { this.bytes.push(0x21, ...uleb(index)); return this; }
   /** Saturating float-to-integer conversions never trap on out-of-range values. */
@@ -90,6 +103,18 @@ export const OP = {
   f64min: 0xa4, f64max: 0xa5, f64eq: 0x61, f64ne: 0x62, f64lt: 0x63, f64gt: 0x64, f64le: 0x65, f64ge: 0x66,
   f32abs: 0x8b, f32neg: 0x8c, f32sqrt: 0x91, f32add: 0x92, f32sub: 0x93, f32mul: 0x94, f32div: 0x95,
   f32min: 0x96, f32max: 0x97, f32eq: 0x5b, f32ne: 0x5c, f32lt: 0x5d, f32gt: 0x5e, f32le: 0x5f, f32ge: 0x60,
+  // SIMD opcodes (0xfd prefix).
+  v128load: 0x00, v128store: 0x0b, i8x16splat: 0x0f, i16x8splat: 0x10, i32x4splat: 0x11,
+  i64x2splat: 0x12, f32x4splat: 0x13, f64x2splat: 0x14,
+  v128not: 0x4d, v128and: 0x4e, v128andnot: 0x4f, v128or: 0x50, v128xor: 0x51,
+  i8x16shl: 0x6b, i8x16shrs: 0x6c, i8x16shru: 0x6d, i8x16add: 0x6e, i8x16sub: 0x71,
+  i16x8shl: 0x8b, i16x8shrs: 0x8c, i16x8shru: 0x8d, i16x8add: 0x8e, i16x8sub: 0x91, i16x8mul: 0x95,
+  i32x4shl: 0xab, i32x4shrs: 0xac, i32x4shru: 0xad, i32x4add: 0xae, i32x4sub: 0xb1, i32x4mul: 0xb5,
+  i64x2shl: 0xcb, i64x2shrs: 0xcc, i64x2shru: 0xcd, i64x2add: 0xce, i64x2sub: 0xd1, i64x2mul: 0xd5,
+  f32x4abs: 0xe0, f32x4neg: 0xe1, f32x4sqrt: 0xe3, f32x4add: 0xe4, f32x4sub: 0xe5, f32x4mul: 0xe6,
+  f32x4div: 0xe7, f32x4min: 0xe8, f32x4max: 0xe9,
+  f64x2abs: 0xec, f64x2neg: 0xed, f64x2sqrt: 0xef, f64x2add: 0xf0, f64x2sub: 0xf1, f64x2mul: 0xf2,
+  f64x2div: 0xf3, f64x2min: 0xf4, f64x2max: 0xf5,
   f32demote: 0xb6, f64promote: 0xbb, f32convertIS: 0xb4, f32convertIU: 0xb5,
   i32reinterpretF32: 0xbe, f32reinterpretI32: 0xbf,
   f64convertIS: 0xb9, f64convertIU: 0xba, i64truncFS: 0xb0, i64truncFU: 0xb1,

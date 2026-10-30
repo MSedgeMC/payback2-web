@@ -1,4 +1,4 @@
-import { Code, F64, I64, OP, buildModule } from "./wasm.ts";
+import { Code, F64, I64, OP, V128, buildModule } from "./wasm.ts";
 import type { LoadKind, StoreKind } from "./wasm.ts";
 import { decode, UnsupportedInstruction } from "./arm64.ts";
 import type { Condition, Instruction } from "./arm64.ts";
@@ -8,9 +8,12 @@ import type { Condition, Instruction } from "./arm64.ts";
 export const REGISTER_FILE_BYTES = 34 * 8, STACK_POINTER_OFFSET = 31 * 8, FLAGS_OFFSET = 32 * 8, PC_OFFSET = 33 * 8;
 /** Floating-point register file follows the general registers: d0..d31. */
 export const FLOATING_REGISTERS_OFFSET = 34 * 8;
+/** Vector register file follows the floating-point registers: v0..v31, 16 bytes each. */
+export const VECTOR_REGISTERS_OFFSET = FLOATING_REGISTERS_OFFSET + 32 * 8;
 const SP = 31, FLAGS = 32, PC = 33, T0 = 34, T1 = 35, T2 = 36, T3 = 37, INDEX = 38;
 // 32 floating-point registers plus two scratch values follow the integer locals.
 const INTEGER_LOCALS = 39, F0 = 39, FT0 = 71, FT1 = 72, FLOAT_LOCALS = 34;
+const V0 = 73, VECTOR_LOCALS = 32;
 const FLAG_N = 1n << 31n, FLAG_Z = 1n << 30n, FLAG_C = 1n << 29n, FLAG_V = 1n << 28n;
 const I64_AND = 0x83, I64_SHR_U = 0x88, I32_AND = 0x71, I32_OR = 0x72;
 
@@ -62,6 +65,9 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
   for (let local = 0; local < 32; local++) {
     body.i32(registerFileOffset + FLOATING_REGISTERS_OFFSET + local * 8); body.load("f64", 0); body.setF(F0 + local);
   }
+  for (let local = 0; local < 32; local++) {
+    body.i32(registerFileOffset + VECTOR_REGISTERS_OFFSET + local * 16); body.simd(OP.v128load, [3, 0]); body.set(V0 + local);
+  }
   // Dispatch on a block index, resolving the entry pc once per call so that re-entry at an
   // arbitrary address (a returned-to caller) still lands on the right block.
   body.i64(0n); body.set(INDEX);
@@ -86,8 +92,12 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
   for (let local = 0; local < 32; local++) {
     body.i32(registerFileOffset + FLOATING_REGISTERS_OFFSET + local * 8); body.getF(F0 + local); body.store("f64", 0);
   }
+  for (let local = 0; local < 32; local++) {
+    body.i32(registerFileOffset + VECTOR_REGISTERS_OFFSET + local * 16); body.get(V0 + local); body.simd(OP.v128store, [3, 0]);
+  }
   // buildModule appends the function's terminating end.
-  const binary = buildModule(body, [{ count: INTEGER_LOCALS, type: I64 }, { count: FLOAT_LOCALS, type: F64 }], memoryPages, shareMemory);
+  const binary = buildModule(body, [{ count: INTEGER_LOCALS, type: I64 }, { count: FLOAT_LOCALS, type: F64 },
+    { count: VECTOR_LOCALS, type: V128 }], memoryPages, shareMemory);
   const module = new WebAssembly.Module(binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength) as ArrayBuffer);
   return { module, entry: start, blocks: count, instructions: decoded.length, unsupported };
 }
@@ -471,6 +481,15 @@ function emitBlock(body: Code, block: Decoded[], context: {
         }
         const foldedOffset = instruction.writeback === undefined ? foldOffset(instruction.offset) : 0;
         body.get(T3); body.raw(OP.wrapI64);
+        if (instruction.precision === 128) {
+          if (instruction.load) { body.load("i32", 0); body.simd(OP.v128load, [3, 0]); body.set(V0 + instruction.register); }
+          else { body.get(V0 + instruction.register); body.simd(OP.v128store, [3, 0]); }
+          if (instruction.writeback === "post") {
+            body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+            body.set(instruction.rn === 31 ? SP : instruction.rn);
+          }
+          break;
+        }
         const kind = instruction.precision === 32 ? "f32" as const : "f64" as const;
         if (instruction.load) {
           body.load(kind, foldedOffset);
@@ -512,6 +531,18 @@ function emitBlock(body: Code, block: Decoded[], context: {
           body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
           body.set(instruction.rn === 31 ? SP : instruction.rn);
         }
+        break;
+      }
+      case "vectorConstant":
+        if (instruction.rd !== 31) { body.v128(instruction.value); body.set(V0 + instruction.rd); }
+        break;
+      case "vectorSplat": {
+        operand(instruction.rn, false);
+        body.raw(OP.wrapI64);
+        const opcode = { 8: OP.i8x16splat, 16: OP.i16x8splat, 32: OP.i32x4splat, 64: OP.i64x2splat }[instruction.element];
+        body.simd(opcode);
+        if (!instruction.q) { body.v128(0xffffffffffffffffn); body.simd(OP.v128and); }
+        body.set(V0 + instruction.rd);
         break;
       }
       case "address":

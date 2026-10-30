@@ -30,6 +30,8 @@ export type Instruction =
   | { kind: "store"; rt: number; rn: number; rm?: number; indexWidth?: Width; offset: number; size: 8 | 16 | 32 | 64; writeback?: "pre" | "post" }
   | { kind: "loadPair"; rt: number; rt2: number; rn: number; offset: number; size: 32 | 64; signed?: boolean; writeback: "none" | "pre" | "post" }
   | { kind: "storePair"; rt: number; rt2: number; rn: number; offset: number; size: 32 | 64; writeback: "none" | "pre" | "post" }
+  | { kind: "vectorConstant"; rd: number; value: bigint }
+  | { kind: "vectorSplat"; rd: number; rn: number; element: 8 | 16 | 32 | 64; q: boolean }
   | { kind: "address"; rd: number; value: bigint }
   | { kind: "loadLiteral"; rd: number; value: bigint; width: Width }
   | { kind: "branch"; target: number }
@@ -46,8 +48,8 @@ export type Instruction =
   | { kind: "fpMoveFromGp"; rd: number; rn: number; width: Width; precision: 32 | 64 }
   | { kind: "fpConvertFromInt"; rd: number; rn: number; signed: boolean; width: Width; precision: 32 | 64 }
   | { kind: "fpConvertToInt"; rd: number; rn: number; signed: boolean; width: Width; precision: 32 | 64 }
-  | { kind: "fpLoadStore"; precision: 32 | 64; register: number; rn: number; rm?: number; indexWidth?: Width; offset: number; writeback?: "pre" | "post"; load: boolean }
-  | { kind: "fpPair"; precision: 32 | 64; rt: number; rt2: number; rn: number; offset: number; load: boolean; writeback: "none" | "pre" | "post" }
+  | { kind: "fpLoadStore"; precision: 32 | 64 | 128; register: number; rn: number; rm?: number; indexWidth?: Width; offset: number; writeback?: "pre" | "post"; load: boolean }
+  | { kind: "fpPair"; precision: 32 | 64 | 128; rt: number; rt2: number; rn: number; offset: number; load: boolean; writeback: "none" | "pre" | "post" }
   | { kind: "return" }
   | { kind: "nop" };
 
@@ -236,21 +238,41 @@ export function decode(address: number, word: number): Instruction {
     const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
     return { kind: "fpConvertToInt", precision, rd, rn, signed: ((word >>> 16) & 1) === 0, width: ((word >>> 31) & 1) === 1 ? 64 : 32 };
   }
+  // MOVI: advanced SIMD modified immediate.
+  if (((word & 0x9ff80400) >>> 0) === 0x0f000400 || ((word & 0x9ff80400) >>> 0) === 0x0f000c00) {
+    const q = ((word >>> 30) & 1) === 1, cmode = (word >>> 12) & 0xf, immediate = (word >>> 5) & 0xff;
+    const shifted = ((immediate << ((word >>> 16) & 7)) | (immediate >>> (8 - ((word >>> 16) & 7)))) & 0xff;
+    let value = 0n;
+    if (cmode === 0xe) {                                  // 16B: replicate the byte
+      for (let index = 0; index < 16; index++) value |= BigInt(shifted) << BigInt(index * 8);
+    } else if (cmode === 0x0 || cmode === 0x2 || cmode === 0x4 || cmode === 0x6) {
+      const lane = BigInt(cmode === 0x0 ? shifted : cmode === 0x2 ? shifted << 8 : cmode === 0x4 ? shifted << 16 : shifted << 24);
+      const lanes = cmode === 0x0 ? 4 : cmode === 0x2 ? 4 : cmode === 0x4 ? 4 : 4;
+      for (let index = 0; index < lanes; index++) value |= BigInt(lane) << BigInt(index * 32);
+    } else throw new UnsupportedInstruction(address, word);
+    if (!q) value &= 0xffffffffffffffffn;
+    return { kind: "vectorConstant", rd, value: BigInt.asUintN(128, value) };
+  }
+  // DUP: splat a general register into every lane.
+  if (((word & 0xbfe0fc00) >>> 0) === 0x0e000c00) {
+    const q = ((word >>> 30) & 1) === 1, index = (word >>> 16) & 0x1f;
+    const element: 8 | 16 | 32 | 64 = (index & 1) === 1 ? 8 : (index & 2) === 2 ? 16 : (index & 4) === 4 ? 32 : 64;
+    return { kind: "vectorSplat", rd, rn, element, q };
+  }
   // Load/store of a floating-point register (unsigned offset, and signed offset with writeback).
   if (((word & 0x3f000000) >>> 0) === 0x3d000000) {
     const sizeBits = (word >>> 30) & 3;
-    // Size 10/11 select quad or 128-bit lanes, which need the SIMD register file.
-    if (sizeBits > 1) throw new UnsupportedInstruction(address, word);
-    const precision: 32 | 64 = sizeBits === 0 ? 32 : 64;
+    if (sizeBits === 3) throw new UnsupportedInstruction(address, word);
+    // 00 = single, 01 = double, 10 = quad register.
+    const precision: 32 | 64 | 128 = sizeBits === 0 ? 32 : sizeBits === 1 ? 64 : 128;
     const load = ((word >>> 22) & 1) === 1;
     const scaled = ((word >>> 24) & 1) === 1;
     const mode = (word >>> 10) & 3;
     if (scaled && mode !== 0) throw new UnsupportedInstruction(address, word);
     if (!scaled && mode === 2) throw new UnsupportedInstruction(address, word);
-    const offset = scaled ? ((word >>> 10) & 0xfff) * (sizeBits === 0 ? 4 : 8) : signExtend((word >>> 12) & 0x1ff, 9);
+    const scale = sizeBits === 0 ? 4 : sizeBits === 1 ? 8 : 16;
+    const offset = scaled ? ((word >>> 10) & 0xfff) * scale : signExtend((word >>> 12) & 0x1ff, 9);
     const writeback = !scaled && mode === 1 ? "post" as const : !scaled && mode === 3 ? "pre" as const : undefined;
-    const scale = sizeBits === 0 ? 4 : 8;
-    void scale;
     return { kind: "fpLoadStore", precision, register: rd, rn, offset, load, ...(writeback ? { writeback } : {}) };
   }
   // Load/store pair of 64-bit floating-point registers.
