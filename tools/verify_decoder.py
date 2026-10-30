@@ -369,14 +369,15 @@ def apply_register_modifier(problems: list[str], ours: dict, text: str, operand:
 
 def compare_logical(ours: dict, insn, ops: list[str], problems: list[str]) -> bool | None:
     mnemonic = insn.mnemonic
-    inverted = {"bic": "andReg", "bics": "andReg", "orn": "orrReg", "eon": "eorReg", "mvn": "orrReg"}
-    plain = {"and": ("andReg", False), "ands": ("andReg", True), "orr": ("orrReg", None), "eor": ("eorReg", None)}
+    # mnemonic -> (kind, flags, inverted third operand). BIC/BICS/ORN/EON/MVN are the
+    # NOT-variants of AND/ANDS/ORR/EOR and share their encodings with N=1.
+    plain = {"and": ("andReg", False, False), "ands": ("andReg", True, False),
+             "orr": ("orrReg", None, False), "eor": ("eorReg", None, False),
+             "bic": ("andReg", False, True), "bics": ("andReg", True, True),
+             "orn": ("orrReg", None, True), "eon": ("eorReg", None, True)}
     flags: bool | None = None
+    invert = False
     shift, amount = "lsl", 0
-    if mnemonic in inverted:
-        problems.append(f"capstone {mnemonic!r} inverts the third operand; our {ours.get('kind')} has no inversion")
-        check_kind(problems, ours, inverted[mnemonic], insn)
-        return True
     if mnemonic == "mov" and len(ops) == 2:
         # MOV <Xd>, <Xm> is ORR <Xd>, XZR, <Xm>; MOV with SP is an add-immediate rendering.
         dst, source = register(ops[0]), register(ops[1])
@@ -384,9 +385,19 @@ def compare_logical(ours: dict, insn, ops: list[str], problems: list[str]) -> bo
             return None
         expected, dst, source, third = "orrReg", dst, (31, "xzr"), source
         register_names = [dst[1], source[1]]
-    elif mnemonic == "tst":
-        if len(ops) not in (2, 3):
+    elif mnemonic == "mvn" and len(ops) in (2, 3):
+        # MVN <Xd>, <Xm> is ORN <Xd>, XZR, <Xm>.
+        dst, source, third = register(ops[0]), (31, "xzr"), register(ops[1])
+        if dst is None or third is None:
             return None
+        expected, invert = "orrReg", True
+        register_names = [dst[1], third[1]]
+        if len(ops) == 3:
+            applied = modifier(ops[2])
+            if applied is None or applied[0] != "shift":
+                return None
+            shift, amount = applied[1], applied[2]
+    elif mnemonic == "tst" and len(ops) in (2, 3):
         dst, source, third = (31, "xzr"), register(ops[0]), register(ops[1])
         if source is None or third is None:
             return None
@@ -397,9 +408,7 @@ def compare_logical(ours: dict, insn, ops: list[str], problems: list[str]) -> bo
             if applied is None or applied[0] != "shift":
                 return None
             shift, amount = applied[1], applied[2]
-    elif mnemonic in plain:
-        if len(ops) not in (3, 4):
-            return None
+    elif mnemonic in plain and len(ops) in (3, 4):
         dst, source, third = register(ops[0]), register(ops[1]), register(ops[2])
         if dst is None or source is None or third is None:
             return None
@@ -408,7 +417,7 @@ def compare_logical(ours: dict, insn, ops: list[str], problems: list[str]) -> bo
             if applied is None or applied[0] != "shift":
                 return None
             shift, amount = applied[1], applied[2]
-        expected, flags = plain[mnemonic]
+        expected, flags, invert = plain[mnemonic]
         register_names = [dst[1], source[1], third[1]]
     else:
         return None
@@ -418,6 +427,10 @@ def compare_logical(ours: dict, insn, ops: list[str], problems: list[str]) -> bo
     check_register(problems, ours, "rm", third)
     if flags is not None:
         check_field(problems, "flags", ours, flags)
+    if invert and "invert" not in ours:
+        problems.append(f"capstone {mnemonic!r} inverts the third operand; our {ours.get('kind')} models no inversion")
+    else:
+        check_field(problems, "invert", ours, invert)
     check_field(problems, "shift", ours, shift)
     check_number(problems, "amount", ours, amount)
     check_width(problems, ours, register_names)
