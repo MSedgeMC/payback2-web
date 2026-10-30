@@ -14,7 +14,7 @@ import { JavaPlatform } from "./java-platform.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 172: "NewObjectArray", 174: "SetObjectArrayElement", 215: "RegisterNatives" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 33: "GetMethodID", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -98,9 +98,13 @@ export class JniEnvironment {
         115: () => this.callStaticObjectMethodV(),
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
+        171: () => this.getArrayLength(),
         172: () => this.newObjectArray(),
+        173: () => this.getObjectArrayElement(),
         174: () => this.setObjectArrayElement(),
+        200: () => this.getByteArrayRegion(),
         215: () => this.registerNatives(),
+        228: () => this.exceptionCheck(),
       };
       // JNI 1.6 has 233 slots, including four reserved pointers; unknown methods retain distinct traps.
       for (let index = 4; index < 233; index++) {
@@ -189,6 +193,14 @@ export class JniEnvironment {
     return entry;
   }
 
+  private arrayReference(address: bigint): Extract<JavaValue, { kind: "object-array" | "byte-array" }> {
+    const entry = this.references.get(address)?.value;
+    if (entry?.kind !== "object-array" && entry?.kind !== "byte-array") {
+      throw new RangeError(`Invalid JNI array reference${entry ? `: ${entry.kind}` : ""}`);
+    }
+    return entry;
+  }
+
   private addReference(value: JavaValue, global: boolean): bigint {
     if (this.references.size >= 256) throw new RangeError("JNI reference limit exceeded");
     const reference = this.nextReference; this.nextReference += 8n;
@@ -231,6 +243,29 @@ export class JniEnvironment {
     return true;
   }
 
+  private exceptionCheck(): void {
+    this.assertEnvironment();
+    // shortcut: managed Java exceptions are handled inside the machine or abort with a diagnostic,
+    // so no JNI call can leave one pending; add pending-exception state when a caller depends on it.
+    this.cpu.writeRegister("x0", 0n);
+  }
+
+  private getArrayLength(): void {
+    this.assertEnvironment();
+    const array = this.arrayReference(this.cpu.readRegister("x1"));
+    this.cpu.writeRegister("x0", BigInt(array.kind === "object-array" ? array.elements.length : array.bytes.length));
+  }
+
+  private getByteArrayRegion(): void {
+    this.assertEnvironment();
+    const array = this.arrayReference(this.cpu.readRegister("x1"));
+    if (array.kind !== "byte-array") throw new RangeError("JNI byte array region requires a byte array");
+    const start = Number(BigInt.asIntN(32, this.cpu.readRegister("x2"))), length = Number(BigInt.asIntN(32, this.cpu.readRegister("x3")));
+    if (start < 0 || length < 0 || start + length > array.bytes.length) throw new RangeError("JNI byte array region is outside the array bounds");
+    // shortcut: an out-of-range region is a diagnostic failure; add real ArrayIndexOutOfBoundsException state when a caller depends on it.
+    writeGuestBytes(this.cpu, this.cpu.readRegister("x4"), array.bytes.subarray(start, start + length));
+  }
+
   private newObjectV(): boolean {
     this.assertEnvironment();
     const clazz = this.classReference(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
@@ -240,6 +275,16 @@ export class JniEnvironment {
     const value = readVariadicLong(this.cpu, this.cpu.readRegister("x3"));
     this.cpu.writeRegister("x0", this.allocateReference({ kind: "boxed-long", value }, 72));
     return true;
+  }
+
+  private getObjectArrayElement(): void {
+    this.assertEnvironment();
+    const array = this.arrayReference(this.cpu.readRegister("x1"));
+    if (array.kind !== "object-array") throw new RangeError("JNI Object array element requires an Object array");
+    const index = Number(BigInt.asIntN(32, this.cpu.readRegister("x2")));
+    if (index < 0 || index >= array.elements.length) throw new RangeError("JNI Object array index is outside bounds");
+    const element = array.elements[index] ?? null;
+    this.cpu.writeRegister("x0", element ? this.addReference(element, false) : 0n);
   }
 
   private setObjectArrayElement(): void {

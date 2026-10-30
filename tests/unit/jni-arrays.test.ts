@@ -26,6 +26,8 @@ test("JNI Object arrays preserve null initialization and retain initial values a
     assert.equal(values.length, 2); assert.deepEqual(values[0], { kind: "string", value: "initial" }); assert.equal(values[1], values[0]);
     call(174, [array, 0x100000001n, initial]);
     assert.equal(elements(array)[1], values[0]);
+    const fetched = call(173, [array, 1n]); assert.notEqual(fetched, initial); assert.equal(jni.referenceValue(fetched), values[0]);
+    assert.equal(call(173, [array, 0n]), 0n);
     const retained = call(21, [filled]); call(23, [initial]); call(23, [filled]);
     assert.equal(jni.referenceValue(retained), object); assert.equal(elements(retained), values);
     assert.deepEqual(values[0], { kind: "string", value: "initial" }); assert.equal(elements(array)[1], values[0]);
@@ -74,4 +76,28 @@ test("JNI Object arrays validate lengths, class and initial references, and cumu
     assert.throws(() => create(16384n), /allocation budget/);
     assert.equal(session.imports.atInterrupt(cpu.readRegister("pc"))?.symbol.name, "JNI.NewObjectArray");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
+});
+
+test("JNI array length reports Object array sizes and rejects non-array references", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n;
+  try {
+    cpu.map(data, 4096n, 3); cpu.copyIn(data, new TextEncoder().encode("java/lang/Object\0text\0"));
+    const entry = session.load("jni_fixture.so", parseElf(syntheticElf()), 0x10000000n).lookupExport("local");
+    const call = (index: number, args: bigint[]) => {
+      cpu.copyIn(entry, tableCall(index)); const result = session.call(entry, [jni.environmentAddress, ...args]);
+      assert.equal(result.status, "returned"); return result.registers.x0;
+    };
+    const clazz = call(6, [data]), text = call(167, [data + 17n]);
+    assert.equal(call(171, [call(172, [0n, clazz, 0n])]), 0n);
+    assert.equal(call(171, [call(172, [3n, clazz, text])]), 3n);
+    const pointer = cpu.copyOut(jni.vmAddress + 512n + 171n * 8n, 8), address = new DataView(pointer.buffer).getBigUint64(0, true);
+    const length = (object: bigint) => {
+      [jni.environmentAddress, object].forEach((value, index) => cpu.writeRegister(`x${index}`, value)); cpu.writeRegister("x30", 0x7fff0000n);
+      const result = cpu.run(address, 0x7fff0000n, 20); assert.equal(result.reason, "interrupt");
+      return session.imports.handleInterrupt(result.pc);
+    };
+    assert.throws(() => length(clazz), /array reference: class/); assert.throws(() => length(text), /array reference: string/);
+    assert.throws(() => length(42n), /array reference/); assert.throws(() => length(0n), /array reference/);
+    assert.equal(session.imports.atInterrupt(cpu.readRegister("pc"))?.symbol.name, "JNI.GetArrayLength");
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); assert.equal(cpu.regions.length, 0); cpu.close(); }
 });

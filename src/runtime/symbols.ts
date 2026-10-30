@@ -3,6 +3,8 @@ import { MAX_TRANSFER_BYTES } from "./adapter.ts";
 import type { ElfSymbol } from "./elf.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { GuestHeap } from "./heap.ts";
+import { GuestSyscalls } from "./syscalls.ts";
+import { libmHandler } from "./libm.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
 export type NativeSettlement = { ok: true; value: unknown } | { ok: false; error: unknown };
@@ -37,11 +39,12 @@ export class NativeImports {
     onReturn?: (value: bigint) => NativeDispatch }[] = [];
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
+  private readonly syscalls: GuestSyscalls;
   private readonly handlers = new Map<bigint, () => NativeDispatch>();
   private disposed = false;
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
-    this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase;
+    this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase; this.syscalls = new GuestSyscalls(cpu);
     this.errnoAddress = dataBase + 32n * 4096n;
     try {
       cpu.map(codeBase, 4096n, 5); this.mappings.push({ address: codeBase, size: 4096n });
@@ -86,6 +89,9 @@ export class NativeImports {
     this.handlers.set(address, handler); return address;
   }
 
+  /** Name of the last raw guest syscall without an implementation, if any. */
+  get unsupportedSyscall(): string | undefined { return this.syscalls.unsupportedSyscall; }
+
   atInterrupt(pc: bigint): NativeImport | undefined {
     return this.entries.find(entry => entry.kind === "function" && entry.address + 4n === pc);
   }
@@ -101,6 +107,14 @@ export class NativeImports {
       this.callbackFrames.pop();
       this.cpu.writeRegister("x30", frame.returnAddress);
       return this.dispatch(frame.onReturn?.(this.cpu.readRegister("x0")));
+    }
+    if (!entry) return this.dispatch(this.syscalls.handle(pc));
+    if (symbol?.version?.library === "libm.so") {
+      const math = libmHandler(symbol.name);
+      if (!math) return false;
+      math(this.cpu);
+      this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
+      return true;
     }
     if (symbol?.version?.library !== "libc.so" || symbol.version.name !== "LIBC") return false;
     if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
@@ -250,6 +264,7 @@ export class NativeImports {
     this.callbackFrames.length = 0;
     this.threadKeys.clear();
     this.heap?.dispose();
+    this.syscalls.dispose();
     this.handlers.clear();
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }

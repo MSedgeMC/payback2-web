@@ -1,3 +1,4 @@
+import { MAX_SLICE_INSTRUCTIONS } from "./adapter.ts";
 import type { ExecutionResult, RuntimeAdapter } from "./adapter.ts";
 import { loadElf } from "./elf.ts";
 import type { ElfImage, LoadedElf } from "./elf.ts";
@@ -26,6 +27,20 @@ export type InitializationProbe = Omit<NativeCallProbe, "status"> & {
 const stack = 0x60000000n, stackSize = 1024n * 1024n, sentinel = 0x7fff0000n;
 const ownedStackSize = stackSize + 4096n, threadPointer = stack + stackSize + 16n;
 const maximumSlices = 400, instructionsPerSlice = 500;
+/** Bounded execution budget. Diagnostics raise it explicitly so the defaults stay safe in a worker. */
+export type ExecutionLimits = { slices: number; milliseconds: number; instructionsPerSlice?: number };
+/** Receives every completed execution slice; used by diagnostics to attribute stalls. */
+export type SliceObserver = (result: ExecutionResult) => void;
+const defaultLimits: ExecutionLimits = { slices: maximumSlices, milliseconds: 3000 };
+function checkLimits(limits: ExecutionLimits): Required<ExecutionLimits> {
+  const perSlice = limits.instructionsPerSlice ?? instructionsPerSlice;
+  if (!Number.isInteger(limits.slices) || limits.slices < 1 || limits.slices > 1_000_000 ||
+      !Number.isFinite(limits.milliseconds) || limits.milliseconds <= 0 || limits.milliseconds > 600_000 ||
+      !Number.isInteger(perSlice) || perSlice < 1 || perSlice > MAX_SLICE_INSTRUCTIONS) {
+    throw new RangeError("Invalid execution limits");
+  }
+  return { ...limits, instructionsPerSlice: perSlice };
+}
 type ExecutionProbe = NativeCallProbe & { completedCalls: number };
 type ResumeValue = NativeSettlement | "timeout" | undefined;
 
@@ -105,9 +120,10 @@ export class NativeSession {
     return this.finishInitialization(loaded, this.execute(loaded.initializers));
   }
 
-  async initializeAsync(loaded: LoadedElf): Promise<InitializationProbe> {
+  async initializeAsync(loaded: LoadedElf, limits: ExecutionLimits = defaultLimits,
+                        observe?: SliceObserver): Promise<InitializationProbe> {
     this.checkInitialization(loaded);
-    return this.finishInitialization(loaded, await this.executeAsync(loaded.initializers));
+    return this.finishInitialization(loaded, await this.executeAsync(loaded.initializers, checkLimits(limits), observe));
   }
 
   private checkInitialization(loaded: LoadedElf): void {
@@ -147,7 +163,7 @@ export class NativeSession {
   }
 
   private execute(addresses: readonly bigint[]): ExecutionProbe {
-    const execution = this.execution(addresses);
+    const execution = this.execution(addresses, checkLimits(defaultLimits));
     let step = execution.next();
     while (!step.done) {
       if (step.value) {
@@ -159,11 +175,12 @@ export class NativeSession {
     return step.value;
   }
 
-  private async executeAsync(addresses: readonly bigint[]): Promise<ExecutionProbe> {
-    const execution = this.execution(addresses), started = performance.now();
+  private async executeAsync(addresses: readonly bigint[], limits: Required<ExecutionLimits> = checkLimits(defaultLimits),
+                             observe?: SliceObserver): Promise<ExecutionProbe> {
+    const execution = this.execution(addresses, limits, observe), started = performance.now();
     let yielded = started, step = execution.next();
     while (!step.done) {
-      const resumed = step.value ? await waitForNative(step.value, 3000 - (performance.now() - started)) : undefined;
+      const resumed = step.value ? await waitForNative(step.value, limits.milliseconds - (performance.now() - started)) : undefined;
       if (performance.now() - yielded >= 8) {
         await new Promise(resolve => setTimeout(resolve, 0)); yielded = performance.now();
       }
@@ -172,7 +189,7 @@ export class NativeSession {
     return step.value;
   }
 
-  private *execution(addresses: readonly bigint[]): Generator<NativeWait | undefined, ExecutionProbe, ResumeValue> {
+  private *execution(addresses: readonly bigint[], limits: Required<ExecutionLimits>, observe?: SliceObserver): Generator<NativeWait | undefined, ExecutionProbe, ResumeValue> {
     this.assertActive();
     const cpu = this.cpu, imports = this.imports, started = performance.now();
     for (const address of addresses) {
@@ -186,17 +203,18 @@ export class NativeSession {
     let status: NativeCallProbe["status"] = "returned";
     let blockedSymbol: string | undefined, blockedLibrary: string | undefined;
     for (const initializer of addresses) {
-      if (sliceCount >= maximumSlices || performance.now() - started >= 3000) {
+      if (sliceCount >= limits.slices || performance.now() - started >= limits.milliseconds) {
         status = "budget";
         last = { reason: "budget", pc: initializer, elapsedMs: 0 };
         break;
       }
       cpu.writeRegister("x30", sentinel);
       let pc = initializer;
-      while (sliceCount < maximumSlices && performance.now() - started < 3000) {
+      while (sliceCount < limits.slices && performance.now() - started < limits.milliseconds) {
         if (this.disposed) throw new Error("Native session is disposed");
         sliceCount++;
-        last = cpu.run(pc, sentinel, instructionsPerSlice);
+        last = cpu.run(pc, sentinel, limits.instructionsPerSlice);
+        observe?.(last);
         pc = last.pc;
         if (last.reason === "interrupt") {
           let handled = imports.handleInterrupt(last.pc);
@@ -222,7 +240,7 @@ export class NativeSession {
       if (last.reason === "interrupt") {
         const entry = imports.atInterrupt(last.pc);
         status = entry ? "blocked-import" : "blocked-interrupt";
-        blockedSymbol = entry?.symbol.name; blockedLibrary = entry?.symbol.version?.library;
+        blockedSymbol = entry?.symbol.name ?? imports.unsupportedSyscall; blockedLibrary = entry?.symbol.version?.library;
         break;
       }
       if (last.reason === "fault") { status = "fault"; break; }
@@ -231,7 +249,7 @@ export class NativeSession {
     }
     this.stopped = status !== "returned";
     return { status, completedCalls,
-      sliceCount, instructionBudget: maximumSlices * instructionsPerSlice, elapsedMs: performance.now() - started,
+      sliceCount, instructionBudget: limits.slices * limits.instructionsPerSlice, elapsedMs: performance.now() - started,
       wasmMemoryBytes: cpu.wasmMemoryBytes, last,
       ...(blockedSymbol ? { blockedSymbol } : {}), ...(blockedLibrary ? { blockedLibrary } : {}),
       registers: { x0: cpu.readRegister("x0"), x1: cpu.readRegister("x1"), x2: cpu.readRegister("x2"),

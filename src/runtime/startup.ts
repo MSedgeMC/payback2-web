@@ -3,7 +3,7 @@ import type { ElfImage } from "./elf.ts";
 import type { DexFile } from "./dex.ts";
 import type { BoundedZip } from "../assets/importer.ts";
 import { NativeSession, probeInitialization } from "./initialize.ts";
-import type { InitializationProbe, NativeCallProbe } from "./initialize.ts";
+import type { ExecutionLimits, InitializationProbe, NativeCallProbe, SliceObserver } from "./initialize.ts";
 import { JniEnvironment, isSupportedJniVersion } from "./jni.ts";
 
 export type GameStartupProbe = {
@@ -14,7 +14,8 @@ export type GameStartupProbe = {
 };
 
 export async function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pairip?: ElfImage,
-                                      java?: { dex: DexFile; base?: BoundedZip }): Promise<GameStartupProbe> {
+                                      java?: { dex: DexFile; base?: BoundedZip }, limits?: ExecutionLimits,
+                                      observe?: SliceObserver): Promise<GameStartupProbe> {
   if (!pairip) return { stage: "engine-constructors", result: probeInitialization(cpu, engine) };
   const session = new NativeSession(cpu);
   let jni: JniEnvironment | undefined;
@@ -22,7 +23,7 @@ export async function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pa
     jni = new JniEnvironment(cpu, session.imports);
     if (java) jni.attachBytecode(java.dex, java.base, name => session.isLibraryInitialized(name));
     const core = session.load("libpairipcore.so", pairip, 0x20000000n);
-    const dependencyInitializers = await session.initializeAsync(core);
+    const dependencyInitializers = await session.initializeAsync(core, limits);
     if (dependencyInitializers.status !== "initializers-returned") {
       return { stage: "dependency-constructors", result: dependencyInitializers };
     }
@@ -31,6 +32,6 @@ export async function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pa
     const version = Number(BigInt.asIntN(32, dependencyJni.registers.x0));
     if (!isSupportedJniVersion(version)) throw new Error(`Dependency JNI_OnLoad returned an unsupported version: ${version}`);
     const loaded = session.load("libpayback2.so", engine, 0x10000000n);
-    return { stage: "engine-constructors", result: await session.initializeAsync(loaded), dependencyInitializers, dependencyJni };
+    return { stage: "engine-constructors", result: await session.initializeAsync(loaded, limits, observe), dependencyInitializers, dependencyJni };
   } finally { jni?.dispose(); session.dispose(); }
 }

@@ -12,7 +12,7 @@ import { words } from "../fixtures/aarch64.ts";
 const tableCall = (index: number) => words(0xf9400008, 0xf9400108 | (index << 10), 0xd61f0100);
 
 test("JNI static managed calls allocate source arrays, enter registered guest code, and release native frame locals", async () => {
-  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n, callback = 0x50000n;
+  const cpu = await createRuntime(), session = new NativeSession(cpu), jni = new JniEnvironment(cpu, session.imports), data = 0x40000n, callback = 0x50000n, destination = 0x60000n;
   try {
     const dex = syntheticManagedDex([0x3012, 0x0023, 1, 0x1071, 1, 0, 0x000c, 0x0011]); dex[218] = 2; dex[219] = 0; dex[225] = 0x89;
     jni.attachBytecode(readDex(dex), undefined, name => session.isLibraryInitialized(name));
@@ -36,9 +36,24 @@ test("JNI static managed calls allocate source arrays, enter registered guest co
     cpu.writeRegister("x19", 123n);
     const value = call(115, [clazz, method, data + 384n]);
     assert.deepEqual(jni.referenceValue(value), { kind: "byte-array", bytes: new Uint8Array(3) });
+    assert.equal(call(171, [value]), 3n);
+    cpu.map(destination, 4096n, 3); cpu.copyIn(destination, new Uint8Array(8).fill(0xaa));
+    call(200, [value, 1n, 2n, destination + 1n]);
+    assert.deepEqual([...cpu.copyOut(destination, 8)], [0xaa, 0, 0, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa]);
+    const region = cpu.copyOut(jni.vmAddress + 512n + 200n * 8n, 8), regionAddress = new DataView(region.buffer).getBigUint64(0, true);
+    const copy = (...args: bigint[]) => {
+      [jni.environmentAddress, ...args].forEach((argument, number) => cpu.writeRegister(`x${number}`, argument));
+      cpu.writeRegister("x30", 0x7fff0000n);
+      const result = cpu.run(regionAddress, 0x7fff0000n, 20); assert.equal(result.reason, "interrupt");
+      return session.imports.handleInterrupt(result.pc);
+    };
+    assert.throws(() => copy(value, 2n, 2n, destination), /outside the array bounds/);
+    assert.throws(() => copy(value, -1n, 1n, destination), /outside the array bounds/);
+    assert.throws(() => copy(clazz, 0n, 1n, destination), /array reference: class/);
+    assert.equal(session.imports.atInterrupt(cpu.readRegister("pc"))?.symbol.name, "JNI.GetByteArrayRegion");
     assert.equal(cpu.readRegister("x19"), 123n); assert.deepEqual(cpu.copyOut(data + 384n, 32), va);
     const temporary = cpu.readRegister("x9"); assert.notEqual(temporary, 0n);
     assert.throws(() => jni.referenceValue(temporary), /reference/);
     call(23, [value]); assert.throws(() => jni.referenceValue(value), /reference/);
-  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.unmap(callback, 4096n); cpu.close(); }
+  } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.unmap(callback, 4096n); cpu.unmap(destination, 4096n); cpu.close(); }
 });
