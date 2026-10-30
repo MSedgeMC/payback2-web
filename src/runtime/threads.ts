@@ -13,7 +13,7 @@ export type ThreadContext = { registers: Map<Register, bigint>; vectors: Uint8Ar
 export type GuestThread = {
   id: number; parentId: number; handle: bigint; sentinel: bigint;
   stack: bigint; stackSize: bigint; tls: bigint;
-  context?: ThreadContext; finished: boolean; result: bigint;
+  context?: ThreadContext; state: "running" | "waiting" | "finished"; waitKey?: bigint; waitMutex?: bigint; result: bigint;
 };
 
 const STACK_BYTES = 256n * 1024n, TLS_BYTES = 4096n, TLS_PREFIX_BYTES = 64;
@@ -63,7 +63,8 @@ export class GuestThreads {
       try { writeGuestBytes(this.cpu, tls + 16n, readGuestBytes(this.cpu, this.cpu.readRegister("tpidr_el0") - 16n, TLS_PREFIX_BYTES)); }
       catch { /* an unmapped parent prefix simply stays zeroed */ }
       const thread: GuestThread = { id, parentId: -1, handle: HANDLE_BASE + BigInt(id) * 0x1000n,
-        sentinel: SENTINEL_BASE + BigInt(id) * 8n, stack, stackSize: STACK_BYTES, tls: tls + 16n, finished: false, result: 0n };
+        sentinel: SENTINEL_BASE + BigInt(id) * 8n, stack, stackSize: STACK_BYTES, tls: tls + 16n,
+        state: "running", result: 0n };
       const parent = this.current;
       // The parent's registers are the snapshot the child starts from and the parent resumes at.
       const saved = this.save();
@@ -88,11 +89,52 @@ export class GuestThreads {
     }
   }
 
+  waitingCount(waitKey: bigint): number {
+    return this.threads.filter(thread => thread.state === "waiting" && thread.waitKey === waitKey).length;
+  }
+
+  /** Suspends the running thread on a wait key and hands control back to its parent. */
+  suspend(waitKey: bigint, mutex: bigint): void {
+    const thread = this.current;
+    if (!thread) throw new Error("Only a guest thread can wait on a condition variable");
+    thread.state = "waiting"; thread.waitKey = waitKey; thread.waitMutex = mutex;
+    thread.context = this.save();
+    if (thread.parentId === -1) {
+      if (!this.mainContext) throw new Error("Guest thread has no resumable parent");
+      this.current = undefined; this.restore(this.mainContext); this.mainContext = undefined;
+      return;
+    }
+    const parent = this.threads.find(candidate => candidate.id === thread.parentId);
+    if (!parent?.context) throw new Error("Guest thread has no resumable parent");
+    this.current = parent; this.restore(parent.context); parent.context = undefined;
+  }
+
+  /**
+   * Resumes a thread waiting on a key, suspending the caller. Returns the mutex the woken
+   * thread must reacquire, or undefined when nothing was waiting. `broadcast` still wakes a
+   * single waiter: the rest keep waiting, which the caller reports rather than hides.
+   */
+  resume(waitKey: bigint, broadcast: boolean): bigint | undefined {
+    void broadcast;
+    const waiter = this.threads.find(thread => thread.state === "waiting" && thread.waitKey === waitKey);
+    if (!waiter?.context) return undefined;
+    const caller = this.current;
+    if (caller) caller.context = this.save(); else this.mainContext = this.save();
+    waiter.parentId = caller?.id ?? -1;
+    waiter.state = "running";
+    const mutex = waiter.waitMutex ?? 0n;
+    waiter.waitKey = undefined; waiter.waitMutex = undefined;
+    this.current = waiter;
+    this.restore(waiter.context);
+    waiter.context = undefined;
+    return mutex;
+  }
+
   /** Called when the running thread reaches its exit sentinel; restores its parent. */
   finish(result: bigint): void {
     const thread = this.current;
     if (!thread) throw new Error("No guest thread is running");
-    thread.finished = true; thread.result = result;
+    thread.state = "finished"; thread.result = result;
     if (thread.parentId === -1) {
       if (!this.mainContext) throw new Error("Guest thread has no resumable parent");
       this.current = undefined; this.restore(this.mainContext); this.mainContext = undefined;
@@ -108,7 +150,7 @@ export class GuestThreads {
   /** Return value of a finished thread, or undefined while it is still running. */
   resultOf(handle: bigint): bigint | undefined {
     const thread = this.threads.find(candidate => candidate.handle === handle);
-    return thread?.finished ? thread.result : undefined;
+    return thread?.state === "finished" ? thread.result : undefined;
   }
 
   /** Validates a thread handle without dereferencing it. */

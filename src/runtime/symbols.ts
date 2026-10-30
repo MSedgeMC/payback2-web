@@ -197,6 +197,26 @@ export class NativeImports {
       this.threads.create(entry, argument, target);
       // The child's context (including its own pc) is installed; skip the libc return path.
       return true;
+    } else if (symbol.name === "pthread_cond_wait") {
+      const condition = this.cpu.readRegister("x0"), mutex = this.cpu.readRegister("x1");
+      // The ABI releases the mutex while waiting and reacquires it on resume. The resumed
+      // call must observe success, so x0 is set before the context is captured.
+      this.setMutex(mutex, 0);
+      this.cpu.writeRegister("x0", 0n);
+      this.threads.suspend(condition, mutex);
+      // The parent runs now; its registers were restored by the scheduler.
+      return true;
+    } else if (symbol.name === "pthread_cond_signal" || symbol.name === "pthread_cond_broadcast") {
+      const condition = this.cpu.readRegister("x0"), broadcast = symbol.name === "pthread_cond_broadcast";
+      this.cpu.writeRegister("x0", 0n);
+      const woken = this.threads.resume(condition, broadcast);
+      if (woken !== undefined) {
+        this.setMutex(woken, 1);
+        if (broadcast && this.threads.waitingCount(condition) > 0) {
+          this.explain(`${this.threads.waitingCount(condition)} waiter(s) still waiting after broadcast`);
+        }
+        return true;
+      }
     } else if (symbol.name === "pthread_join") {
       const handle = this.cpu.readRegister("x0"), result = this.threads.resultOf(handle);
       if (!this.threads.has(handle)) { this.cpu.writeRegister("x0", 3n); return true; } // ESRCH
@@ -258,6 +278,16 @@ export class NativeImports {
     } else return false;
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
+  }
+
+  /** Sets the observed byte of an uncontended guest mutex. */
+  private setMutex(address: bigint, value: number): void {
+    if (address === 0n) return;
+    try {
+      const bytes = readGuestBytes(this.cpu, address, 4);
+      new DataView(bytes.buffer, bytes.byteOffset, 4).setUint16(0, value, true);
+      writeGuestBytes(this.cpu, address, bytes.subarray(0, 2));
+    } catch { /* an unmapped mutex is reported by the lock path instead */ }
   }
 
   private validateCallback(address: bigint, args: readonly bigint[]): void {
