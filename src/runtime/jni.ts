@@ -14,7 +14,7 @@ import { JavaPlatform } from "./java-platform.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 29: "NewObjectV", 30: "NewObjectA", 33: "GetMethodID", 35: "CallObjectMethodV", 38: "CallBooleanMethodV", 50: "CallIntMethodV", 53: "CallLongMethodV", 62: "CallVoidMethodV", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 24: "IsSameObject", 29: "NewObjectV", 30: "NewObjectA", 33: "GetMethodID", 35: "CallObjectMethodV", 38: "CallBooleanMethodV", 50: "CallIntMethodV", 53: "CallLongMethodV", 62: "CallVoidMethodV", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -93,6 +93,7 @@ export class JniEnvironment {
         21: () => this.retainGlobalReference(),
         22: () => this.deleteReference(true),
         23: () => this.deleteReference(false),
+        24: () => this.isSameObject(),
         29: () => this.newObjectV(),
         30: () => this.newObjectA(),
         33: () => this.getMethod(false),
@@ -262,6 +263,14 @@ export class JniEnvironment {
     // shortcut: managed Java exceptions are handled inside the machine or abort with a diagnostic,
     // so no JNI call can leave one pending; add pending-exception state when a caller depends on it.
     this.cpu.writeRegister("x0", 0n);
+  }
+
+  private isSameObject(): void {
+    this.assertEnvironment();
+    // References hold shared value objects, so identity comparison survives distinct handles.
+    const left = this.referenceValue(this.cpu.readRegister("x1")),
+      right = this.referenceValue(this.cpu.readRegister("x2"));
+    this.cpu.writeRegister("x0", left === right ? 1n : 0n);
   }
 
   private getArrayLength(): void {

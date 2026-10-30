@@ -27,6 +27,8 @@ test("JNI Object arrays preserve null initialization and retain initial values a
     call(174, [array, 0x100000001n, initial]);
     assert.equal(elements(array)[1], values[0]);
     const fetched = call(173, [array, 1n]); assert.notEqual(fetched, initial); assert.equal(jni.referenceValue(fetched), values[0]);
+    assert.equal(call(24, [fetched, initial]), 1n); assert.equal(call(24, [fetched, 0n]), 0n);
+    assert.equal(call(24, [0n, 0n]), 1n); assert.equal(call(24, [array, initial]), 0n);
     assert.equal(call(173, [array, 0n]), 0n);
     const retained = call(21, [filled]); call(23, [initial]); call(23, [filled]);
     assert.equal(jni.referenceValue(retained), object); assert.equal(elements(retained), values);
