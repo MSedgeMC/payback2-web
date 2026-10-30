@@ -217,6 +217,10 @@ export class NativeImports {
         }
         return true;
       }
+    } else if (symbol.name === "pthread_detach") {
+      const handle = this.cpu.readRegister("x0");
+      // A detached thread is not joined; scheduling already does not require it.
+      this.cpu.writeRegister("x0", this.threads.has(handle) ? 0n : 3n); // ESRCH
     } else if (symbol.name === "pthread_join") {
       const handle = this.cpu.readRegister("x0"), result = this.threads.resultOf(handle);
       if (!this.threads.has(handle)) { this.cpu.writeRegister("x0", 3n); return true; } // ESRCH

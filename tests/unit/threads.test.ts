@@ -55,6 +55,13 @@ test("thread creation rejects a non-executable entry point and ignores unknown h
     const trapped = cpu.run(traps, 0x7fff0000n, 4);
     assert.throws(() => session.imports.handleInterrupt(trapped.pc), /entry point is outside executable guest memory/);
     assert.equal(session.imports.threads.count(), 0, "a refused thread allocates nothing");
+    // Detaching reports ESRCH for an unknown handle instead of claiming success.
+    const detach = session.imports.resolve({ name: "pthread_detach", type: 2, binding: 1, visibility: 0,
+      section: 0, address: 0n, size: 0n, version: { name: "LIBC", library: "libc.so" } });
+    cpu.writeRegister("x0", 0x1234n); cpu.writeRegister("x30", 0x7fff0000n);
+    const detaching = cpu.run(detach, 0x7fff0000n, 4);
+    assert.equal(session.imports.handleInterrupt(detaching.pc), true);
+    assert.equal(cpu.readRegister("x0"), 3n);
   } finally { session.dispose(); cpu.close(); }
 });
 
