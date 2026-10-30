@@ -14,7 +14,7 @@ import { JavaPlatform } from "./java-platform.ts";
 const version = 0x00010006;
 const supportedVersions = new Set([0x00010001, 0x00010002, 0x00010004, version]);
 export function isSupportedJniVersion(value: number): boolean { return supportedVersions.has(value); }
-const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 24: "IsSameObject", 29: "NewObjectV", 30: "NewObjectA", 33: "GetMethodID", 35: "CallObjectMethodV", 38: "CallBooleanMethodV", 50: "CallIntMethodV", 53: "CallLongMethodV", 62: "CallVoidMethodV", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
+const methodNames: Record<number, string> = { 4: "GetVersion", 6: "FindClass", 17: "ExceptionClear", 21: "NewGlobalRef", 22: "DeleteGlobalRef", 23: "DeleteLocalRef", 24: "IsSameObject", 29: "NewObjectV", 30: "NewObjectA", 33: "GetMethodID", 35: "CallObjectMethodV", 36: "CallObjectMethodA", 38: "CallBooleanMethodV", 39: "CallBooleanMethodA", 50: "CallIntMethodV", 51: "CallIntMethodA", 53: "CallLongMethodV", 54: "CallLongMethodA", 62: "CallVoidMethodV", 63: "CallVoidMethodA", 113: "GetStaticMethodID", 115: "CallStaticObjectMethodV", 144: "GetStaticFieldID", 167: "NewStringUTF", 171: "GetArrayLength", 172: "NewObjectArray", 173: "GetObjectArrayElement", 174: "SetObjectArrayElement", 200: "GetByteArrayRegion", 215: "RegisterNatives", 228: "ExceptionCheck" };
 type JavaMethod = { className: string; name: string; descriptor: string; isStatic: boolean; isNative: boolean };
 // shortcut: observed standard Java methods only; extend definitions when native callers require them.
 const classMethods: Record<string, readonly string[]> = {
@@ -99,10 +99,15 @@ export class JniEnvironment {
         33: () => this.getMethod(false),
         113: () => this.getMethod(true),
         35: () => this.callMethodV("object"),
+        36: () => this.callMethodA("object"),
         38: () => this.callMethodV("boolean"),
+        39: () => this.callMethodA("boolean"),
         50: () => this.callMethodV("int"),
+        51: () => this.callMethodA("int"),
         53: () => this.callMethodV("long"),
+        54: () => this.callMethodA("long"),
         62: () => this.callMethodV("void"),
+        63: () => this.callMethodA("void"),
         115: () => this.callStaticObjectMethodV(),
         144: () => this.getStaticField(),
         167: () => this.newStringUtf(),
@@ -394,6 +399,20 @@ export class JniEnvironment {
   }
 
   private callMethodV(result: "object" | "boolean" | "int" | "long" | "void"): NativeDispatch {
+    const signature = this.instanceSignature(result);
+    if (!signature) return false;
+    const words = readVariadicWords(this.cpu, this.cpu.readRegister("x3"), signature.parameters.length);
+    return this.callMethod(result, signature, words);
+  }
+
+  private callMethodA(result: "object" | "boolean" | "int" | "long" | "void"): NativeDispatch {
+    const signature = this.instanceSignature(result);
+    if (!signature) return false;
+    return this.callMethod(result, signature, this.readJValues(this.cpu.readRegister("x3"), signature.parameters.length));
+  }
+
+  /** Validates an instance call against the requested result type, returning its signature. */
+  private instanceSignature(result: "object" | "boolean" | "int" | "long" | "void"): ReturnType<typeof parseJavaMethod> | undefined {
     this.assertEnvironment();
     const receiver = this.referenceValue(this.cpu.readRegister("x1")), method = this.methods.get(this.cpu.readRegister("x2"));
     if (!method || method.isStatic) throw new RangeError("Invalid JNI instance method identifier");
@@ -402,9 +421,13 @@ export class JniEnvironment {
     const matches = result === "object" ? signature.result.startsWith("L") || signature.result.startsWith("[")
       : signature.result === { boolean: "Z", int: "I", long: "J", void: "V" }[result];
     if (!matches) throw new RangeError(`JNI ${result} call disagrees with ${method.descriptor}`);
-    if (signature.parameters.some(type => type === "F" || type === "D")) return false;
-    if (!this.java) return false;
-    const words = readVariadicWords(this.cpu, this.cpu.readRegister("x3"), signature.parameters.length);
+    if (signature.parameters.some(type => type === "F" || type === "D") || !this.java) return undefined;
+    return signature;
+  }
+
+  private callMethod(result: "object" | "boolean" | "int" | "long" | "void",
+                     signature: ReturnType<typeof parseJavaMethod>, words: readonly bigint[]): NativeDispatch {
+    const receiver = this.referenceValue(this.cpu.readRegister("x1"))!, method = this.methods.get(this.cpu.readRegister("x2"))!;
     const args = signature.parameters.map((type, index): JavaDatum => {
       const word = words[index]!;
       if (type.startsWith("L") || type.startsWith("[")) return this.referenceValue(word);
@@ -413,7 +436,7 @@ export class JniEnvironment {
       throw new Error(`Unsupported JNI instance argument type ${type}`);
     });
     const reference = { className: method.className, name: method.name, descriptor: method.descriptor };
-    return this.runJava(this.java.invoke(reference, [receiver, ...args], "virtual"), value => {
+    return this.runJava(this.java!.invoke(reference, [receiver, ...args], "virtual"), value => {
       if (result === "void") this.cpu.writeRegister("x0", 0n);
       else if (result === "object") {
         const object = this.java!.object(value); this.cpu.writeRegister("x0", object ? this.addReference(object, false) : 0n);
