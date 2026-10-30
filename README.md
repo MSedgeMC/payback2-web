@@ -15,11 +15,13 @@ native threads. Execution currently stops on an unsynchronised condition
 variable wait (`pthread_cond_wait`). Engine initialization, rendering, gameplay
 input, and audio remain unfinished.
 
-Execution is moving from interpretation to an ahead-of-time translator: AArch64 is
-decoded and emitted as WebAssembly, with basic blocks dispatched inside the module.
-The first slice measures roughly 1,950-2,653 million guest instructions per second
-against 1.5 million for the interpreter. It currently covers a small 64-bit integer
-subset and is not yet connected to the engine. See `docs/PERFORMANCE.md`.
+Execution is moving from interpretation to ahead-of-time translation: AArch64 is
+decoded and emitted as WebAssembly with an in-module block dispatcher. On the
+dependency's own integrity loop the translated code is **1,922x faster** than the
+interpreter (3,043 vs 2 million guest instructions per second) with an identical
+result. The decoder covers 88.7% of the dependency's executable words and 78.8% of
+the engine's decodable code; the remaining gap is dominated by floating point and
+SIMD. See `docs/PERFORMANCE.md`.
 
 The browser interface reports loading and compatibility diagnostics. It does
 not yet provide a playable scene.

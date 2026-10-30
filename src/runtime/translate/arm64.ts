@@ -19,6 +19,7 @@ export type Instruction =
   | { kind: "eorReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; width: Width }
   | { kind: "madd"; rd: number; rn: number; rm: number; ra: number; subtract: boolean; width: Width }
   | { kind: "divide"; rd: number; rn: number; rm: number; signed: boolean; width: Width }
+  | { kind: "multiplyLong"; rd: number; rn: number; rm: number; ra: number; subtract: boolean; signed: boolean }
   | { kind: "shiftReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; width: Width }
   | { kind: "movz"; rd: number; value: bigint; shift: number; width: Width }
   | { kind: "movk"; rd: number; value: bigint; shift: number; width: Width }
@@ -138,6 +139,12 @@ export function decode(address: number, word: number): Instruction {
     const rm = (word >>> 16) & 31, subtract = ((word >>> 15) & 1) === 1, ra = (word >>> 10) & 31;
     return { kind: "madd", rd, rn, rm, ra, subtract, width };
   }
+  // Long multiply-add/subtract (32-bit operands, 64-bit result).
+  if (((word & 0xff200000) >>> 0) === 0x9b200000) {
+    const rm = (word >>> 16) & 31, subtract = ((word >>> 15) & 1) === 1;
+    const ra = (word >>> 10) & 31, signed = ((word >>> 23) & 1) === 0;
+    return { kind: "multiplyLong", rd, rn, rm, ra, subtract, signed };
+  }
   // Data-processing two source: divide and variable shift.
   if (((word & 0x1fe00000) >>> 0) === 0x1ac00000) {
     const rm = (word >>> 16) & 31, opcode = (word >>> 10) & 0x3f;
@@ -171,9 +178,10 @@ export function decode(address: number, word: number): Instruction {
   // Load/store pair, 64-bit, signed offset with optional writeback.
   if (((word & 0x3a000000) >>> 0) === 0x28000000 && ((word >>> 26) & 1) === 0) {
     const load = ((word >>> 22) & 1) === 1, mode = (word >>> 23) & 3, opc = (word >>> 30) & 3;
-    if (opc > 2 || mode === 2 || (opc === 2 && !load)) throw new UnsupportedInstruction(address, word);
+    if (opc > 2 || (opc === 2 && !load)) throw new UnsupportedInstruction(address, word);
     const element: 32 | 64 = opc === 0 ? 32 : 64;
     const immediate = Number(BigInt(signExtend((word >>> 15) & 0x7f, 7)) * BigInt(element / 8));
+    // 01 = post-index, 11 = pre-index, 00 = no-allocate and 10 = plain signed offset.
     const writeback = mode === 1 ? "post" as const : mode === 3 ? "pre" as const : "none" as const;
     const rt = word & 31, rt2 = (word >>> 10) & 31;
     if (load) return { kind: "loadPair", rt, rt2, rn, offset: immediate, size: element,

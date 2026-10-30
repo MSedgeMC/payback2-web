@@ -43,6 +43,40 @@ currently covers a small 64-bit integer subset (arithmetic, compare, branch,
 load/store, move-wide, return). Everything else falls back with the address reported
 in `TranslationResult.unsupported`.
 
+### On real engine machine code
+
+`node tools/benchmark_real_code.ts` runs the dependency's own FNV-1a integrity loop
+(the exact instructions at `libpairipcore.so` + 0x47d20..0x47d4c) under both engines:
+
+| Engine | Time to hash 200,000 bytes | Throughput |
+| --- | --- | --- |
+| Unicorn interpreter | 904 ms | 2 MIPS |
+| Translated WASM | 0.46 ms | 3,043 MIPS |
+
+**1,922x**, with a bit-identical hash, flags and register file.
+
+## Translation coverage
+
+`node tools/coverage_report.ts <elf>` reports how much of a library's executable
+text the decoder accepts, excluding `udf` padding and embedded data:
+
+| Library | Coverage |
+| --- | --- |
+| libpairipcore.so (dependency) | 88.7% of executable words |
+| libpayback2.so (game engine) | 78.8% of Capstone-decodable code |
+
+The engine's remaining gap is dominated by floating point, measured by sampling
+its unsupported instructions:
+
+| Class | Share of gaps |
+| --- | --- |
+| scalar FP arithmetic and conversion (`fmadd`, `fmul`, `fadd`, `fcmp`, `scvtf`, `fcvtzs`) | 51% |
+| vector/SIMD memory and immediates (`ldr q`, `ldp q`, `movi`, `ushr`) | 26% |
+| other integer (`ldp`/`stp` variants, `ldrsh`, `smaddl`, `ccmp`) | 23% |
+
+Integer code is essentially covered; floating point and SIMD are the next
+subsystem. That work is also what the renderer needs, so it is not avoidable.
+
 ## Consequence for gameplay
 
 The interpreted path (1.5 MIPS) could never deliver a frame. The translated path

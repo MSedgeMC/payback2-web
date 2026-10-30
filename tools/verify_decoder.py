@@ -43,14 +43,22 @@ MAX_MISMATCHES = 40
 MAX_UNVERIFIED = 12
 MASK64 = (1 << 64) - 1
 CONDITION_ALIASES = {"hs": "cs", "lo": "cc"}
+INVERTED_CONDITIONS = {"eq": "ne", "ne": "eq", "cs": "cc", "cc": "cs", "mi": "pl", "pl": "mi",
+                       "vs": "vc", "vc": "vs", "hi": "ls", "ls": "hi", "ge": "lt", "lt": "ge",
+                       "gt": "le", "le": "gt", "al": "nv", "nv": "al"}
 WIDTH_REGISTERS = {"x": 64, "xzr": 64, "sp": 64, "w": 32, "wzr": 32, "wsp": 32}
 EXTEND_IDENTITY = {"uxtx", "sxtx"}          # Xm extended to 64 bits is Xm
 # mnemonic -> (size, signed) or None when the size follows the destination register.
+# Hint-space renderings the decoder accepts as state-free no-ops by design (PAC, BTI, ...).
+HINT_MNEMONICS = {"nop", "yield", "wfe", "wfi", "sev", "sevl", "esb", "csdb", "psb", "tsb", "dgh",
+                  "hint", "bti", "paciasp", "pacibsp", "autiasp", "autibsp", "paciaz", "pacibz",
+                  "autiaz", "autibz", "xpaclri", "pacga"}
 LOAD_SIZES = {
-    "ldr": None, "str": None,
-    "ldrb": (8, False), "strb": (8, False),
-    "ldrh": (16, False), "strh": (16, False),
+    "ldr": None, "str": None, "ldur": None, "stur": None,
+    "ldrb": (8, False), "strb": (8, False), "ldurb": (8, False), "sturb": (8, False),
+    "ldrh": (16, False), "strh": (16, False), "ldurh": (16, False), "sturh": (16, False),
     "ldrsb": (8, True), "ldrsh": (16, True), "ldrsw": (32, True),
+    "ldursb": (8, True), "ldursh": (16, True), "ldursw": (32, True),
 }
 
 sys.path.insert(0, str(CAPSTONE_ROOT))
@@ -316,6 +324,15 @@ def compare_arithmetic_register(ours: dict, insn, ops: list[str], problems: list
             shift, amount = recognised
         subtract, flags = mnemonic == "cmp", True
         register_names = [source[1], third[1]]
+    elif mnemonic in ("neg", "negs"):
+        # NEG <Xd>, <Xm> is SUB <Xd>, XZR, <Xm>.
+        if len(ops) != 2:
+            return None
+        dst, source, third = register(ops[0]), (31, "xzr"), register(ops[1])
+        if dst is None or third is None:
+            return None
+        subtract, flags = True, mnemonic == "negs"
+        register_names = [dst[1], third[1]]
     else:
         return None
     check_kind(problems, ours, "subReg" if subtract else "addReg", insn)
@@ -500,9 +517,12 @@ def compare_load_store(ours: dict, insn, ops: list[str], problems: list[str]) ->
     if memory is None:
         problems.append(f"addressing: our {ours.get('kind')} cannot express capstone's {insn.op_str!r}")
         return True
-    if len(ops) == 3 or memory["writeback"]:
-        problems.append(f"addressing: capstone renders a pre/post-index form ({insn.op_str!r}); ours models a plain offset")
-        return True
+    offset, writeback = memory["offset"], "pre" if memory["writeback"] else "none"
+    if len(ops) == 3:
+        trailing = immediate_operand(ops[2])
+        if trailing is None:
+            return None
+        offset, writeback = trailing, "post"
     if memory["scaled"]:
         problems.append(f"addressing: capstone scales the index register ({ops[1]!r}); our {ours.get('kind')} does not model it")
         return True
@@ -518,26 +538,27 @@ def compare_load_store(ours: dict, insn, ops: list[str], problems: list[str]) ->
         check_number(problems, "indexWidth", ours, WIDTH_REGISTERS[memory["index"][1]])
         check_number(problems, "offset", ours, 0)
     else:
-        check_number(problems, "offset", ours, memory["offset"])
+        check_number(problems, "offset", ours, offset)
         if "rm" in ours:
             problems.append("rm: ours reports an index register, capstone renders an immediate offset")
+    check_field(problems, "writeback", ours, writeback)
     return True
 
 
 def compare_pair(ours: dict, insn, ops: list[str], problems: list[str]) -> bool | None:
     load = ours.get("kind") == "loadPair"
-    accepted = ("ldp", "ldnp") if load else ("stp", "stnp")
+    accepted = ("ldp", "ldnp", "ldpsw") if load else ("stp", "stnp")
     if len(ops) not in (3, 4):
         return None
     if insn.mnemonic not in accepted:
         simd = register(ops[0]) is None and ops[0].strip()[:1] in ("q", "d", "s", "h", "b", "v")
-        if simd or insn.mnemonic in ("ldpsw", "stgp", "ld64b", "st64b"):
-            problems.append(f"kind: capstone renders {insn.mnemonic} {insn.op_str}, which our 64-bit pair model does not express")
+        if simd or insn.mnemonic in ("stgp", "ld64b", "st64b"):
+            problems.append(f"kind: capstone renders {insn.mnemonic} {insn.op_str}, which our pair model does not express")
             return True
         return None
     rt, rt2 = register(ops[0]), register(ops[1])
-    memory = memory_operand(ops[2]) if len(ops) >= 3 else None
-    if rt is None or rt2 is None or memory is None:
+    memory = memory_operand(ops[2])
+    if rt is None or rt2 is None or memory is None or memory["index"] is not None:
         return None
     offset, writeback = memory["offset"], "pre" if memory["writeback"] else "none"
     if len(ops) == 4:
@@ -545,34 +566,55 @@ def compare_pair(ours: dict, insn, ops: list[str], problems: list[str]) -> bool 
         if trailing is None:
             return None
         offset, writeback = trailing, "post"
-    if memory["index"] is not None:
-        return None
-    register_names = [rt[1], rt2[1]]
-    if any(name in ("w", "wzr", "wsp") for name in register_names):
-        problems.append(f"width: capstone renders the 32-bit pair form {insn.mnemonic} {insn.op_str}; our pair model is 64-bit only")
     check_register(problems, ours, "rt", rt)
     check_register(problems, ours, "rt2", rt2)
     check_register(problems, ours, "rn", memory["base"])
+    # LDPSW sign-extends 32-bit elements into two 64-bit registers.
+    signed = insn.mnemonic == "ldpsw"
+    check_number(problems, "size", ours, 32 if signed else WIDTH_REGISTERS[rt[1]])
+    if load:
+        check_field(problems, "signed", ours, signed)
     check_number(problems, "offset", ours, offset)
     check_field(problems, "writeback", ours, writeback)
     return True
 
 
 def compare_select(ours: dict, insn, ops: list[str], problems: list[str]) -> bool | None:
-    table = {"csel": (False, False), "csinc": (False, True), "csinv": (True, False), "csneg": (True, True)}
-    if insn.mnemonic not in table or len(ops) != 4:
+    """Conditional select and its aliases (CSET, CSETM, CINC, CINV, CNEG)."""
+    mnemonic = insn.mnemonic
+    # mnemonic -> (operand count, rn from operand, rm from operand, invert, increment)
+    direct = {"csel": (4, 1, 2, False, False), "csinc": (4, 1, 2, False, True),
+              "csinv": (4, 1, 2, True, False), "csneg": (4, 1, 2, True, True)}
+    aliased = {"cset": (2, None, None, False, True), "csetm": (2, None, None, True, False),
+               "cinc": (3, 1, 1, False, True), "cinv": (3, 1, 1, True, False),
+               "cneg": (3, 1, 1, True, True)}
+    if mnemonic in direct:
+        count, rn_slot, rm_slot, invert, increment = direct[mnemonic]
+        inverted_condition = False
+    elif mnemonic in aliased:
+        count, rn_slot, rm_slot, invert, increment = aliased[mnemonic]
+        inverted_condition = True                     # every CSEL alias negates the condition
+    else:
         return None
-    dst, source, third = register(ops[0]), register(ops[1]), register(ops[2])
-    condition = CONDITION_ALIASES.get(ops[3].strip().lower(), ops[3].strip().lower())
+    if len(ops) != count:
+        return None
+    dst = register(ops[0])
+    source = register(ops[rn_slot]) if rn_slot is not None else (31, "xzr")
+    third = register(ops[rm_slot]) if rm_slot is not None else (31, "xzr")
+    condition = CONDITION_ALIASES.get(ops[-1].strip().lower(), ops[-1].strip().lower())
     if dst is None or source is None or third is None:
         return None
+    if inverted_condition:
+        if condition not in INVERTED_CONDITIONS:
+            return None
+        condition = INVERTED_CONDITIONS[condition]
     check_register(problems, ours, "rd", dst)
     check_register(problems, ours, "rn", source)
     check_register(problems, ours, "rm", third)
     check_field(problems, "condition", ours, condition)
-    check_field(problems, "invert", ours, table[insn.mnemonic][0])
-    check_field(problems, "increment", ours, table[insn.mnemonic][1])
-    check_width(problems, ours, [dst[1], source[1], third[1]])
+    check_field(problems, "invert", ours, invert)
+    check_field(problems, "increment", ours, increment)
+    check_width(problems, ours, [dst[1]] + [name for name in (source[1], third[1]) if name in ("w", "x")])
     return True
 
 
@@ -864,7 +906,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         problems: list[str] = []
         if not comparator(entry, instruction, split_operands(instruction.op_str), problems):
-            unverified.append((address, word, describe(entry), f"capstone {instruction.mnemonic} {instruction.op_str}".strip()))
+            if kind == "nop" and instruction.mnemonic in HINT_MNEMONICS:
+                reason = f"capstone {instruction.mnemonic}: hint/PAC/BTI space, which our decoder no-ops by design"
+            else:
+                reason = f"capstone {instruction.mnemonic} {instruction.op_str}".strip()
+            unverified.append((address, word, describe(entry), reason))
             continue
         compared += 1
         if problems:

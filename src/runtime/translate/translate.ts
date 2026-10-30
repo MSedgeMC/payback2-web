@@ -209,6 +209,22 @@ function emitBlock(body: Code, block: Decoded[], context: {
         store(instruction.rd, false, instruction.width);
         break;
       }
+      case "multiplyLong": {
+        // Both multiplicands widen from 32 bits before the multiply.
+        const widen = (register: number, target: number): void => {
+          operand(register, false); body.set(target);
+          body.get(target); body.i64(32n);
+          body.raw(instruction.signed ? OP.shl64 : OP.shrU64);
+          if (instruction.signed) body.raw(OP.shrS64);
+          body.set(target);
+        };
+        widen(instruction.rn, T0); widen(instruction.rm, T1);
+        body.get(T0); body.get(T1); body.raw(OP.mul64); body.set(T2);
+        if (instruction.ra !== 31) { body.get(T2); body.get(instruction.ra); body.raw(instruction.subtract ? OP.sub64 : OP.add64); body.set(T2); }
+        else if (instruction.subtract) { body.i64(0n); body.get(T2); body.raw(OP.sub64); body.set(T2); }
+        store(instruction.rd, false, 64);
+        break;
+      }
       case "shiftReg": {
         operand(instruction.rn, false); body.set(T0);
         operand(instruction.rm, false); body.set(T1);
