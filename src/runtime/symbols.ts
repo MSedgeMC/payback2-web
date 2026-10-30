@@ -4,6 +4,7 @@ import type { ElfSymbol } from "./elf.ts";
 import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 import { GuestHeap } from "./heap.ts";
 import { GuestSyscalls } from "./syscalls.ts";
+import { GuestThreads } from "./threads.ts";
 import { libmHandler } from "./libm.ts";
 
 export type NativeImport = { symbol: ElfSymbol; address: bigint; kind: "function" | "data" };
@@ -40,12 +41,13 @@ export class NativeImports {
   private readonly errnoAddress: bigint;
   private heap: GuestHeap | undefined;
   private readonly syscalls: GuestSyscalls;
+  readonly threads: GuestThreads;
   private readonly handlers = new Map<bigint, () => NativeDispatch>();
   private detail: string | undefined;
   private disposed = false;
 
   constructor(cpu: RuntimeAdapter, codeBase = 0x70000000n, dataBase = 0x71000000n) {
-    this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase; this.syscalls = new GuestSyscalls(cpu);
+    this.cpu = cpu; this.codeBase = codeBase; this.dataBase = dataBase; this.syscalls = new GuestSyscalls(cpu); this.threads = new GuestThreads(cpu);
     this.errnoAddress = dataBase + 32n * 4096n;
     try {
       cpu.map(codeBase, 4096n, 5); this.mappings.push({ address: codeBase, size: 4096n });
@@ -188,6 +190,21 @@ export class NativeImports {
       view.setUint16(0, locking ? 1 : 0, true);
       writeGuestBytes(this.cpu, address, bytes.subarray(0, 2));
       this.cpu.writeRegister("x0", 0n);
+    } else if (symbol.name === "pthread_create") {
+      const entry = this.cpu.readRegister("x2"), argument = this.cpu.readRegister("x3"), target = this.cpu.readRegister("x0");
+      // The parent must observe success when it resumes, so record it before the context snapshot.
+      this.cpu.writeRegister("x0", 0n);
+      this.threads.create(entry, argument, target);
+      // The child's context (including its own pc) is installed; skip the libc return path.
+      return true;
+    } else if (symbol.name === "pthread_join") {
+      const handle = this.cpu.readRegister("x0"), result = this.threads.resultOf(handle);
+      if (!this.threads.has(handle)) { this.cpu.writeRegister("x0", 3n); return true; } // ESRCH
+      // shortcut: cooperative scheduling means a joiner only observes finished threads.
+      if (result === undefined) return false;
+      const retval = this.cpu.readRegister("x1");
+      if (retval !== 0n) writeGuestBytes(this.cpu, retval, new Uint8Array(new BigUint64Array([result]).buffer));
+      this.cpu.writeRegister("x0", 0n);
     } else if (symbol.name === "pthread_once") {
       const control = this.cpu.readRegister("x0");
       if (control % 4n) throw new RangeError("Native once control is not aligned");
@@ -285,6 +302,7 @@ export class NativeImports {
     this.threadKeys.clear();
     this.heap?.dispose();
     this.syscalls.dispose();
+    this.threads.dispose();
     this.handlers.clear();
     for (const mapping of this.mappings.splice(0).reverse()) this.cpu.unmap(mapping.address, mapping.size);
   }

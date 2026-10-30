@@ -215,8 +215,15 @@ export class NativeSession {
       while (sliceCount < limits.slices && performance.now() - started < limits.milliseconds) {
         if (this.disposed) throw new Error("Native session is disposed");
         sliceCount++;
-        last = cpu.run(pc, sentinel, limits.instructionsPerSlice);
+        const threadSentinel = imports.threads.activeSentinel;
+        last = cpu.run(pc, threadSentinel ?? sentinel, limits.instructionsPerSlice);
         observe?.(last);
+        if (threadSentinel !== undefined && last.reason === "end") {
+          // A child thread returned from its start routine: resume its parent where it left off.
+          imports.threads.finish(cpu.readRegister("x0"));
+          pc = cpu.readRegister("pc"); last = { reason: "budget", pc, elapsedMs: last.elapsedMs };
+          sliceCount--; continue;
+        }
         pc = last.pc;
         if (last.reason === "interrupt") {
           let handled = imports.handleInterrupt(last.pc);
