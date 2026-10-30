@@ -23,7 +23,7 @@ function fixtures(refused = false) {
 test("game startup retains a dependency through JNI and genuine linked engine constructors", async () => {
   const cpu = await createRuntime();
   try {
-    const { core, engine } = fixtures(), result = probeGameStartup(cpu, engine, core);
+    const { core, engine } = fixtures(), result = await probeGameStartup(cpu, engine, core);
     assert.equal(result.stage, "engine-constructors"); assert.equal(result.result.status, "initializers-returned");
     assert.equal(result.dependencyInitializers?.completedInitializers, 2);
     assert.equal(result.dependencyJni?.registers.x0, 0x10006n);
@@ -36,7 +36,7 @@ test("a refused JNI load cannot advance to engine constructors and still release
   const cpu = await createRuntime();
   try {
     const { core, engine } = fixtures(true);
-    assert.throws(() => probeGameStartup(cpu, engine, core), /JNI_OnLoad returned an unsupported version: -1/);
+    await assert.rejects(probeGameStartup(cpu, engine, core), /JNI_OnLoad returned an unsupported version: -1/);
     assert.equal(cpu.regions.length, 0);
   } finally { cpu.close(); }
 });

@@ -2,10 +2,10 @@ import { openAsBlob } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
 import { SUPPORTED_GAME, verifyEngine, verifyPairip, verifyStartupBytecode } from "../src/assets/baseline.ts";
-import { readPackageLibraries, readPackageBytecode } from "../src/assets/importer.ts";
+import { readPackageLibraries, readPackageBase } from "../src/assets/importer.ts";
 import { createRuntime } from "../src/runtime/unicorn.ts";
 import { parseElf } from "../src/runtime/elf.ts";
-import { readDexClass } from "../src/runtime/dex.ts";
+import { readDex } from "../src/runtime/dex.ts";
 import { probeGameStartup } from "../src/runtime/startup.ts";
 
 const root = process.env.PAYBACK2_DATA_ROOT;
@@ -16,14 +16,16 @@ const input = await openAsBlob(path);
 const file = new File([input], basename(path)), files = await readPackageLibraries(file);
 await verifyEngine(files.engine);
 if (files.pairip) await verifyPairip(files.pairip);
-const bytecode = await readPackageBytecode(file);
+const base = await readPackageBase(file);
+let cpu: Awaited<ReturnType<typeof createRuntime>> | undefined;
+try {
+const bytecode = base ? await base.bytes(SUPPORTED_GAME.startupDexName, SUPPORTED_GAME.startupDexBytes) : undefined;
 if (bytecode) await verifyStartupBytecode(bytecode);
-const javaClass = bytecode ? readDexClass(bytecode, "com/pairip/VMRunner") : undefined;
+const java = bytecode ? { dex: readDex(bytecode), base } : undefined;
 const importElapsedMs = performance.now() - importStarted;
 const image = parseElf(files.engine), pairip = files.pairip ? parseElf(files.pairip) : undefined;
-const cpu = await createRuntime();
-try {
-  const result = probeGameStartup(cpu, image, pairip, javaClass);
+cpu = await createRuntime();
+  const result = await probeGameStartup(cpu, image, pairip, java);
   const serialize = (_key: string, value: unknown): unknown => typeof value === "bigint" ? `0x${value.toString(16)}` : value;
   const report = { engineSha256: SUPPORTED_GAME.engineSha256, ...(pairip ? { pairipSha256: SUPPORTED_GAME.pairipSha256 } : {}),
                    ...(bytecode ? { startupDexSha256: SUPPORTED_GAME.startupDexSha256 } : {}), inputBytes: input.size, importElapsedMs,
@@ -31,4 +33,4 @@ try {
   await mkdir(".local", { recursive: true });
   await writeFile(".local/engine-probe.json", JSON.stringify(report, serialize, 2) + "\n");
   console.log(JSON.stringify(report, serialize, 2));
-} finally { cpu.close(); }
+} finally { cpu?.close(); await base?.close(); }
