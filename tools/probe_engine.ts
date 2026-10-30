@@ -31,7 +31,8 @@ try {
   const importElapsedMs = performance.now() - importStarted;
   const image = parseElf(files.engine), pairip = files.pairip ? parseElf(files.pairip) : undefined;
   cpu = await createRuntime();
-  const result = await probeGameStartup(cpu, image, pairip, java, { slices, milliseconds, ...(instructionsPerSlice ? { instructionsPerSlice } : {}) });
+  const skipPairip = process.env.SKIP_PAIRIP === "1";
+  const result = await probeGameStartup(cpu, image, skipPairip ? undefined : pairip, java, { slices, milliseconds, ...(instructionsPerSlice ? { instructionsPerSlice } : {}) });
   const serialize = (_key: string, value: unknown): unknown => typeof value === "bigint" ? `0x${value.toString(16)}` : value;
   const report = { engineSha256: SUPPORTED_GAME.engineSha256, ...(pairip ? { pairipSha256: SUPPORTED_GAME.pairipSha256 } : {}),
                    ...(bytecode ? { startupDexSha256: SUPPORTED_GAME.startupDexSha256 } : {}), inputBytes: input.size, importElapsedMs,

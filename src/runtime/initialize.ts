@@ -14,6 +14,7 @@ export type NativeCallProbe = {
   last: ExecutionResult;
   blockedSymbol?: string;
   blockedDetail?: string;
+  notices?: string[];
   blockedLibrary?: string;
   registers: { x0: bigint; x1: bigint; x2: bigint; x8: bigint; x30: bigint; sp: bigint };
 };
@@ -255,6 +256,7 @@ export class NativeSession {
       wasmMemoryBytes: cpu.wasmMemoryBytes, last,
       ...(blockedSymbol ? { blockedSymbol } : {}), ...(blockedLibrary ? { blockedLibrary } : {}),
       ...(blockedDetail ? { blockedDetail } : {}),
+      ...(imports.notices.length ? { notices: [...imports.notices] } : {}),
       registers: { x0: cpu.readRegister("x0"), x1: cpu.readRegister("x1"), x2: cpu.readRegister("x2"),
                    x8: cpu.readRegister("x8"), x30: cpu.readRegister("x30"), sp: cpu.readRegister("sp") },
     };

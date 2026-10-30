@@ -1,12 +1,13 @@
 import type { RuntimeAdapter } from "./adapter.ts";
 import type { NativeDispatch } from "./symbols.ts";
-import { readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
+import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts";
 
 // arm64 Linux syscall numbers, verified against asm-generic/unistd.h (the arm64 table).
 // Native imports reach the host through SVC traps; a direct `svc #0` is guest code issuing
 // a raw kernel call, which happens in the protected dependency rather than in libc.
 export const SYS = {
   gettimeofday: 169, clock_gettime: 113, clock_getres: 114, getpid: 172, gettid: 178, set_tid_address: 96,
+  openat: 56, close: 57, read: 63, lseek: 62, faccessat: 48, newfstatat: 79, readlinkat: 78,
 } as const;
 
 // Only numbers that this module can name; unknown numbers stay visible as their index.
@@ -21,7 +22,7 @@ const names: Record<number, string> = {
 
 const SVC_ZERO = 0xd4000001;
 const CLOCK_REALTIME = 0, CLOCK_REALTIME_COARSE = 5, CLOCK_REALTIME_ALARM = 8;
-const EINVAL = 22;
+const EBADF = 9, EFAULT = 14, EINVAL = 22, ENOENT = 2;
 
 type Timespec = { seconds: number; nanoseconds: number };
 
@@ -45,6 +46,11 @@ export function syscallName(number: number): string { return names[number] ?? `s
 export class GuestSyscalls {
   private readonly cpu: RuntimeAdapter;
   private blocked: string | undefined;
+  /** Environment facts the guest was told about, kept visible rather than silent. */
+  private readonly noticeList: string[] = [];
+  /** Open descriptors over synthetic in-process files; the browser guest has no kernel file tree. */
+  private readonly descriptors = new Map<number, { path: string; bytes: Uint8Array; position: number }>();
+  private nextDescriptor = 3;
   private disposed = false;
 
   constructor(cpu: RuntimeAdapter) { this.cpu = cpu; }
@@ -52,14 +58,27 @@ export class GuestSyscalls {
   /** Name of the last raw syscall that had no implementation, for diagnostics. */
   get unsupportedSyscall(): string | undefined { return this.blocked; }
 
+  /** Bounded record of refusals the guest received as normal error codes. */
+  get notices(): readonly string[] { return this.noticeList; }
+
+  private notice(message: string): void {
+    if (this.noticeList.length < 16 && !this.noticeList.includes(message)) this.noticeList.push(message);
+  }
+
   handle(pc: bigint): NativeDispatch {
     if (this.disposed) throw new Error("Guest syscalls are disposed");
     this.blocked = undefined;
     if (pc < 4n || !this.isRawSyscall(pc - 4n)) return false;
     const number = Number(BigInt.asUintN(32, this.cpu.readRegister("x8")));
-    if (!this.dispatch(number)) { this.blocked = syscallName(number); return false; }
+    if (!this.dispatch(number)) { this.blocked = `${syscallName(number)}${this.pathArgument(number)}`; return false; }
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
+  }
+
+  /** Path-based syscalls report the requested path, so a refusal names the guest's target. */
+  private pathArgument(number: number): string {
+    if (![SYS.openat, SYS.faccessat, SYS.newfstatat, SYS.readlinkat].includes(number as never)) return "";
+    try { return `(${new TextDecoder().decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256))})`; } catch { return ""; }
   }
 
   private isRawSyscall(address: bigint): boolean {
@@ -70,6 +89,10 @@ export class GuestSyscalls {
   }
 
   private dispatch(number: number): boolean {
+    if (number === SYS.openat) return this.openAt();
+    if (number === SYS.close) return this.close();
+    if (number === SYS.read) return this.read();
+    if (number === SYS.lseek) return this.seek();
     if (number === SYS.clock_gettime) return this.clockGetTime();
     if (number === SYS.clock_getres) return this.clockGetRes();
     if (number === SYS.gettimeofday) return this.getTimeOfDay();
@@ -79,6 +102,69 @@ export class GuestSyscalls {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Resolves a guest path. `/proc/self/maps` is rendered from this runtime's own region
+   * table, so the guest sees a truthful description of its address space rather than an
+   * invented one. Any other path has no backing store and reports ENOENT.
+   */
+  private virtualFile(path: string): Uint8Array | undefined {
+    if (path !== "/proc/self/maps" && path !== "/proc/self/smaps") return undefined;
+    const lines = this.cpu.regions.map(region => {
+      const permissions = `${region.permissions & 1 ? "r" : "-"}${region.permissions & 2 ? "w" : "-"}${region.permissions & 4 ? "x" : "-"}p`;
+      const start = region.address.toString(16).padStart(8, "0"), end = (region.address + region.size).toString(16).padStart(8, "0");
+      return `${start}-${end} ${permissions} 00000000 00:00 0 `;
+    });
+    return new TextEncoder().encode(lines.length ? `${lines.join("\n")}\n` : "");
+  }
+
+  private openAt(): boolean {
+    let path = "";
+    try { path = new TextDecoder().decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256)); } catch { /* an unreadable path is still missing */ }
+    const bytes = path ? this.virtualFile(path) : undefined;
+    if (!bytes) {
+      this.notice(`openat(${path || "<unreadable>"}) reported ENOENT`);
+      this.cpu.writeRegister("x0", BigInt(-ENOENT));
+      return true;
+    }
+    const descriptor = this.nextDescriptor++;
+    this.descriptors.set(descriptor, { path, bytes, position: 0 });
+    this.cpu.writeRegister("x0", BigInt(descriptor));
+    return true;
+  }
+
+  private close(): boolean {
+    const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0")));
+    if (!this.descriptors.delete(descriptor)) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
+    this.cpu.writeRegister("x0", 0n);
+    return true;
+  }
+
+  private read(): boolean {
+    const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0"))), file = this.descriptors.get(descriptor);
+    if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
+    const count = Number(BigInt.asUintN(64, this.cpu.readRegister("x2")));
+    if (!Number.isSafeInteger(count) || count < 0) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
+    const available = Math.min(count, file.bytes.length - file.position);
+    const chunk = file.bytes.subarray(file.position, file.position + available);
+    try { writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), chunk); }
+    catch { this.cpu.writeRegister("x0", BigInt(-EFAULT)); return true; }
+    file.position += available;
+    this.cpu.writeRegister("x0", BigInt(available));
+    return true;
+  }
+
+  private seek(): boolean {
+    const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0"))), file = this.descriptors.get(descriptor);
+    if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
+    const offset = BigInt.asIntN(64, this.cpu.readRegister("x1")), origin = Number(BigInt.asIntN(32, this.cpu.readRegister("x2")));
+    const base = origin === 0 ? 0 : origin === 1 ? file.position : origin === 2 ? file.bytes.length : undefined;
+    const position = base === undefined ? -1n : BigInt(base) + offset;
+    if (position < 0n || position > BigInt(file.bytes.length)) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
+    file.position = Number(position);
+    this.cpu.writeRegister("x0", position);
+    return true;
   }
 
   private clockGetTime(): boolean {
@@ -125,5 +211,5 @@ export class GuestSyscalls {
     writeGuestBytes(this.cpu, address, bytes);
   }
 
-  dispose(): void { this.disposed = true; this.blocked = undefined; }
+  dispose(): void { this.disposed = true; this.blocked = undefined; this.noticeList.length = 0; this.descriptors.clear(); }
 }

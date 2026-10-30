@@ -2,7 +2,7 @@ import type { RuntimeAdapter } from "./adapter.ts";
 import type { ElfImage } from "./elf.ts";
 import type { DexFile } from "./dex.ts";
 import type { BoundedZip } from "../assets/importer.ts";
-import { NativeSession, probeInitialization } from "./initialize.ts";
+import { NativeSession } from "./initialize.ts";
 import type { ExecutionLimits, InitializationProbe, NativeCallProbe, SliceObserver } from "./initialize.ts";
 import { JniEnvironment, isSupportedJniVersion } from "./jni.ts";
 
@@ -16,7 +16,13 @@ export type GameStartupProbe = {
 export async function probeGameStartup(cpu: RuntimeAdapter, engine: ElfImage, pairip?: ElfImage,
                                       java?: { dex: DexFile; base?: BoundedZip }, limits?: ExecutionLimits,
                                       observe?: SliceObserver): Promise<GameStartupProbe> {
-  if (!pairip) return { stage: "engine-constructors", result: probeInitialization(cpu, engine) };
+  if (!pairip) {
+    const session = new NativeSession(cpu);
+    try {
+      const loaded = session.load("libpayback2.so", engine, 0x10000000n);
+      return { stage: "engine-constructors", result: await session.initializeAsync(loaded, limits, observe) };
+    } finally { session.dispose(); }
+  }
   const session = new NativeSession(cpu);
   let jni: JniEnvironment | undefined;
   try {

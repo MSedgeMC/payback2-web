@@ -93,6 +93,9 @@ export class NativeImports {
   /** Name of the last raw guest syscall without an implementation, if any. */
   get unsupportedSyscall(): string | undefined { return this.syscalls.unsupportedSyscall; }
 
+  /** Refusals the guest received as normal error codes, for bounded diagnostics. */
+  get notices(): readonly string[] { return this.syscalls.notices; }
+
   /** Why the last dispatched import was refused, for bounded diagnostics. */
   get unsupportedDetail(): string | undefined { return this.detail ?? this.syscalls.unsupportedSyscall; }
 

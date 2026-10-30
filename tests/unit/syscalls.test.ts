@@ -57,3 +57,33 @@ test("unsupported and non-syscall interrupts stay visible instead of fabricating
     syscalls.dispose(); assert.throws(() => syscalls.handle(code + 4n), /disposed/);
   } finally { cpu.unmap(code, 4096n); cpu.close(); }
 });
+
+test("guest descriptors read a truthful process map and reject bad descriptors", async () => {
+  const cpu = await createRuntime(), syscalls = new GuestSyscalls(cpu);
+  const code = 0x30000n, data = 0x40000n, buffer = 0x41000n;
+  try {
+    cpu.map(code, 4096n, 5); cpu.map(data, 4096n, 3);
+    cpu.copyIn(code, new Uint8Array([0x01, 0x00, 0x00, 0xd4]));
+    cpu.copyIn(data, new TextEncoder().encode("/proc/self/maps\0/proc/self/nope\0"));
+    const call = (number: number, args: bigint[] = []) => {
+      cpu.writeRegister("x8", BigInt(number)); args.forEach((value, index) => cpu.writeRegister(`x${index}` as `x${number}`, value));
+      syscalls.handle(code + 4n); return BigInt.asIntN(64, cpu.readRegister("x0"));
+    };
+    cpu.map(buffer, 4096n, 3);
+    const descriptor = call(SYS.openat, [0n, data, 0n, 0n]);
+    assert.ok(descriptor >= 3n && descriptor < 64n);
+    const length = call(SYS.read, [descriptor, buffer, 4096n]);
+    assert.ok(length > 0n, "the map file must contain the guest regions");
+    const text = new TextDecoder().decode(cpu.copyOut(buffer, Number(length)));
+    const lines = text.split("\n").filter(Boolean);
+    assert.equal(lines.length, cpu.regions.length, "every mapped region is listed exactly once");
+    for (const line of lines) assert.match(line, /^[0-9a-f]{8}-[0-9a-f]{8} [r-][w-][x-]p 00000000 00:00 0 $/);
+    assert.equal(call(SYS.read, [descriptor, buffer, 4096n]), 0n, "reaching the end returns zero bytes");
+    assert.equal(call(SYS.lseek, [descriptor, 0n, 0n]), 0n);
+    assert.equal(call(SYS.close, [descriptor]), 0n);
+    assert.equal(call(SYS.read, [descriptor, buffer, 16n]), -9n);
+    assert.equal(call(SYS.close, [descriptor]), -9n);
+    assert.equal(call(SYS.openat, [0n, data + 16n, 0n, 0n]), -2n);
+    assert.ok(syscalls.notices.some(notice => notice.includes("/proc/self/nope")));
+  } finally { cpu.unmap(buffer, 4096n); syscalls.dispose(); cpu.unmap(code, 4096n); cpu.unmap(data, 4096n); cpu.close(); }
+});
