@@ -1,24 +1,40 @@
-// AArch64 decoding for the translated subset. Anything outside the subset is reported
-// as unsupported rather than guessed, so the driver can fall back instead of mis-executing.
+// AArch64 decoding for the translated subset. Anything outside the subset is reported as
+// unsupported rather than guessed, so the driver can fall back instead of mis-executing.
+// Width 32 operations are modelled on zero-extended 64-bit locals, which is how AArch64
+// defines writes to W registers.
 
 export type Condition = "eq" | "ne" | "cs" | "cc" | "mi" | "pl" | "vs" | "vc" | "hi" | "ls" | "ge" | "lt" | "gt" | "le" | "al" | "nv";
+export type Width = 32 | 64;
+export type BitfieldOp = "sbfm" | "ubfm";
 
 export type Instruction =
-  | { kind: "addImm"; rd: number; rn: number; immediate: bigint; flags: boolean }
-  | { kind: "subImm"; rd: number; rn: number; immediate: bigint; flags: boolean }
-  | { kind: "addReg"; rd: number; rn: number; rm: number; flags: boolean }
-  | { kind: "subReg"; rd: number; rn: number; rm: number; flags: boolean }
-  | { kind: "andReg"; rd: number; rn: number; rm: number; flags: boolean }
-  | { kind: "orrReg"; rd: number; rn: number; rm: number }
-  | { kind: "eorReg"; rd: number; rn: number; rm: number }
-  | { kind: "movz"; rd: number; value: bigint; shift: number }
-  | { kind: "movk"; rd: number; value: bigint; shift: number }
-  | { kind: "load"; rd: number; rn: number; offset: number }
-  | { kind: "store"; rt: number; rn: number; offset: number }
+  | { kind: "addImm"; rd: number; rn: number; immediate: bigint; flags: boolean; width: Width }
+  | { kind: "subImm"; rd: number; rn: number; immediate: bigint; flags: boolean; width: Width }
+  | { kind: "addReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; width: Width }
+  | { kind: "subReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; width: Width }
+  | { kind: "andReg"; rd: number; rn: number; rm: number; flags: boolean; width: Width }
+  | { kind: "orrReg"; rd: number; rn: number; rm: number; width: Width }
+  | { kind: "eorReg"; rd: number; rn: number; rm: number; width: Width }
+  | { kind: "madd"; rd: number; rn: number; rm: number; ra: number; subtract: boolean; width: Width }
+  | { kind: "divide"; rd: number; rn: number; rm: number; signed: boolean; width: Width }
+  | { kind: "shiftReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; width: Width }
+  | { kind: "movz"; rd: number; value: bigint; shift: number; width: Width }
+  | { kind: "movk"; rd: number; value: bigint; shift: number; width: Width }
+  | { kind: "movn"; rd: number; value: bigint; shift: number; width: Width }
+  | { kind: "bitfield"; rd: number; rn: number; operation: BitfieldOp; immediateR: number; immediateS: number; width: Width }
+  | { kind: "select"; rd: number; rn: number; rm: number; condition: Condition; invert: boolean; increment: boolean; width: Width }
+  | { kind: "load"; rd: number; rn: number; rm?: number; indexWidth?: Width; offset: number; size: 8 | 16 | 32 | 64; signed: boolean }
+  | { kind: "store"; rt: number; rn: number; rm?: number; indexWidth?: Width; offset: number; size: 8 | 16 | 32 | 64 }
+  | { kind: "loadPair"; rt: number; rt2: number; rn: number; offset: number; writeback: "none" | "pre" | "post" }
+  | { kind: "storePair"; rt: number; rt2: number; rn: number; offset: number; writeback: "none" | "pre" | "post" }
+  | { kind: "address"; rd: number; value: bigint }
+  | { kind: "loadLiteral"; rd: number; value: bigint; width: Width }
   | { kind: "branch"; target: number }
   | { kind: "branchLink"; target: number }
+  | { kind: "branchReg"; rn: number }
+  | { kind: "branchLinkReg"; rn: number }
   | { kind: "branchCond"; condition: Condition; target: number }
-  | { kind: "compareZero"; register: number; target: number; branchIfZero: boolean }
+  | { kind: "compareZero"; register: number; target: number; branchIfZero: boolean; width: Width }
   | { kind: "return" }
   | { kind: "nop" };
 
@@ -32,53 +48,134 @@ export class UnsupportedInstruction extends Error {
 }
 
 const conditions: readonly Condition[] = ["eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"];
+const shifts: readonly ("lsl" | "lsr" | "asr")[] = ["lsl", "lsr", "asr"];
 
 /** Decodes one instruction; `address` is the guest address of `word`. */
 export function decode(address: number, word: number): Instruction {
-  const rd = word & 31, rn = (word >>> 5) & 31;
-  if (word === 0xd503201f) return { kind: "nop" };
-  if (((word & 0xfffffc1f) >>> 0) === 0xd65f0000) {
+  const rd = word & 31, rn = (word >>> 5) & 31, unsigned = word >>> 0;
+  if (unsigned === 0xd503201f) return { kind: "nop" };
+  const sf = (word >>> 31) & 1, width: Width = sf === 1 ? 64 : 32;
+
+  // Branch register and return.
+  if (((unsigned & 0xfffffc1f) >>> 0) === 0xd61f0000) return { kind: "branchReg", rn };
+  if (((unsigned & 0xfffffc1f) >>> 0) === 0xd63f0000) return { kind: "branchLinkReg", rn };
+  if (((unsigned & 0xfffffc1f) >>> 0) === 0xd65f0000) {
     if (rn !== 30) throw new UnsupportedInstruction(address, word);
     return { kind: "return" };
   }
-  // Move wide immediates: MOVZ / MOVK, 64-bit only for now.
-  if (((word & 0xff800000) >>> 0) === 0xd2800000 || ((word & 0xff800000) >>> 0) === 0xf2800000) {
-    const movz = ((word & 0xff800000) >>> 0) === 0xd2800000;
-    const shift = ((word >>> 21) & 3) * 16, value = BigInt((word >>> 5) & 0xffff) << BigInt(shift);
-    return movz ? { kind: "movz", rd, value, shift } : { kind: "movk", rd, value, shift };
+  // Move wide immediates.
+  if (((word >>> 23) & 0x3f) === 0x25) {
+    const opc = (word >>> 29) & 3, shift = ((word >>> 21) & 3) * 16;
+    const immediate = BigInt((word >>> 5) & 0xffff) << BigInt(shift);
+    if (opc === 2) return { kind: "movz", rd, value: immediate, shift, width };
+    if (opc === 3) return { kind: "movk", rd, value: immediate, shift, width };
+    if (opc === 0) {
+      const mask = width === 64 ? 0xffffffffffffffffn : 0xffffffffn;
+      return { kind: "movn", rd, value: (~immediate & mask), shift, width };
+    }
+    throw new UnsupportedInstruction(address, word);
   }
-  // Add/subtract immediate, 64-bit.
+  // Bitfield operations; the common aliases are derived by the emitter.
+  if (((word >>> 23) & 0x3f) === 0x26) {
+    const opc = (word >>> 29) & 3;
+    if (opc === 0 || opc === 2) {
+      const immediateR = (word >>> 16) & 0x3f, immediateS = (word >>> 10) & 0x3f;
+      if (width === 32 && (immediateR > 31 || immediateS > 31)) throw new UnsupportedInstruction(address, word);
+      return { kind: "bitfield", rd, rn, operation: opc === 0 ? "sbfm" : "ubfm", immediateR, immediateS, width };
+    }
+    throw new UnsupportedInstruction(address, word);
+  }
+  // Add/subtract immediate.
   if (((word & 0x1f000000) >>> 0) === 0x11000000) {
-    // 32-bit forms are a wider change to the register model, so they stay in the fallback.
-    if (((word >>> 31) & 1) !== 1) throw new UnsupportedInstruction(address, word);
-    const flags = ((word >>> 29) & 1) === 1, subtract = ((word >>> 30) & 1) === 1;
-    const shift = (word >>> 22) & 3;
+    const subtract = ((word >>> 30) & 1) === 1, flags = ((word >>> 29) & 1) === 1, shift = (word >>> 22) & 3;
     if (shift > 1) throw new UnsupportedInstruction(address, word);
     const immediate = BigInt((word >>> 10) & 0xfff) << BigInt(shift * 12);
-    return { kind: subtract ? "subImm" : "addImm", rd, rn, immediate, flags };
+    return { kind: subtract ? "subImm" : "addImm", rd, rn, immediate, flags, width };
   }
-  // Add/subtract shifted register, 64-bit, LSL #0 only.
+  // Add/subtract shifted register.
   if (((word & 0x1f000000) >>> 0) === 0x0b000000) {
-    if (((word >>> 22) & 3) !== 0 || ((word >>> 10) & 0x3f) !== 0 || (word & 0x800) !== 0) throw new UnsupportedInstruction(address, word);
-    const rm = (word >>> 16) & 31, flags = ((word >>> 29) & 1) === 1, subtract = ((word >>> 30) & 1) === 1;
-    return { kind: subtract ? "subReg" : "addReg", rd, rn, rm, flags };
+    const shiftCode = (word >>> 22) & 3;
+    if (shiftCode > 2) throw new UnsupportedInstruction(address, word);
+    const amount = (word >>> 10) & 0x3f, rm = (word >>> 16) & 31;
+    if (width === 32 && amount > 31) throw new UnsupportedInstruction(address, word);
+    const subtract = ((word >>> 30) & 1) === 1, flags = ((word >>> 29) & 1) === 1;
+    return { kind: subtract ? "subReg" : "addReg", rd, rn, rm, shift: shifts[shiftCode]!, amount, flags, width };
   }
-  // Logical shifted register, 64-bit, LSL #0 only.
+  // Logical shifted register.
   if (((word & 0x1f000000) >>> 0) === 0x0a000000) {
     if (((word >>> 22) & 3) !== 0 || ((word >>> 10) & 0x3f) !== 0 || (word & 0x800) !== 0) throw new UnsupportedInstruction(address, word);
     const rm = (word >>> 16) & 31, opc = (word >>> 29) & 3;
-    if (opc === 0) return { kind: "andReg", rd, rn, rm, flags: false };
-    if (opc === 1) return { kind: "orrReg", rd, rn, rm };
-    if (opc === 2) return { kind: "eorReg", rd, rn, rm };
-    if (opc === 3) return { kind: "andReg", rd, rn, rm, flags: true };
+    if (opc === 0) return { kind: "andReg", rd, rn, rm, flags: false, width };
+    if (opc === 1) return { kind: "orrReg", rd, rn, rm, width };
+    if (opc === 2) return { kind: "eorReg", rd, rn, rm, width };
+    return { kind: "andReg", rd, rn, rm, flags: true, width };
+  }
+  // Multiply-add/subtract, including the MUL/MNEG aliases (Ra = 31).
+  if (((word >>> 24) & 0x1f) === 0x1b && ((word >>> 21) & 7) === 0) {
+    const rm = (word >>> 16) & 31, subtract = ((word >>> 15) & 1) === 1, ra = (word >>> 10) & 31;
+    return { kind: "madd", rd, rn, rm, ra, subtract, width };
+  }
+  // Data-processing two source: divide and variable shift.
+  if (((word & 0x1fe00000) >>> 0) === 0x1ac00000) {
+    const rm = (word >>> 16) & 31, opcode = (word >>> 10) & 0x3f;
+    if (opcode === 0x02) return { kind: "divide", rd, rn, rm, signed: false, width };
+    if (opcode === 0x03) return { kind: "divide", rd, rn, rm, signed: true, width };
+    if (opcode === 0x08) return { kind: "shiftReg", rd, rn, rm, shift: "lsl", width };
+    if (opcode === 0x09) return { kind: "shiftReg", rd, rn, rm, shift: "lsr", width };
+    if (opcode === 0x0a) return { kind: "shiftReg", rd, rn, rm, shift: "asr", width };
     throw new UnsupportedInstruction(address, word);
   }
-  // Load/store unsigned offset, 64-bit general registers.
-  if (((word & 0xffc00000) >>> 0) === 0xf9400000) {
-    return { kind: "load", rd: word & 31, rn, offset: ((word >>> 10) & 0xfff) * 8 };
+  // Conditional select family.
+  if (((word & 0x1fe00000) >>> 0) === 0x1a800000 && ((word >>> 10) & 3) === 0) {
+    const rm = (word >>> 16) & 31, condition = conditions[word & 0xf]!;
+    if (condition === "nv") throw new UnsupportedInstruction(address, word);
+    const op = (word >>> 30) & 1, increment = ((word >>> 10) & 1) === 1;
+    return { kind: "select", rd, rn, rm, condition, invert: op === 1, increment, width };
   }
-  if (((word & 0xffc00000) >>> 0) === 0xf9000000) {
-    return { kind: "store", rt: word & 31, rn, offset: ((word >>> 10) & 0xfff) * 8 };
+  // PC-relative address.
+  if (((word & 0x1f000000) >>> 0) === 0x10000000) {
+    const page = ((word >>> 31) & 1) === 1;
+    const immediate = BigInt(signExtend(((word >>> 5) & 0x7ffff), 19)) << 2n | BigInt((word >>> 29) & 3);
+    const base = BigInt(page ? address & ~0xfff : address);
+    return { kind: "address", rd, value: base + (page ? immediate << 12n : immediate) };
+  }
+  // Load register literal.
+  if (((word & 0x3b000000) >>> 0) === 0x18000000 && ((word >>> 26) & 1) === 0) {
+    const opc = (word >>> 30) & 3, target = address + signExtend((word >>> 5) & 0x7ffff, 19) * 4;
+    if (opc === 0 || opc === 1) return { kind: "loadLiteral", rd, value: BigInt(target), width: opc === 0 ? 32 : 64 };
+    throw new UnsupportedInstruction(address, word);
+  }
+  // Load/store pair, 64-bit, signed offset with optional writeback.
+  if (((word & 0x3a000000) >>> 0) === 0x28000000 && ((word >>> 26) & 1) === 0) {
+    const load = ((word >>> 22) & 1) === 1, mode = (word >>> 23) & 3;
+    const immediate = BigInt(signExtend((word >>> 15) & 0x7f, 7)) * 8n;
+    const rt2 = (word >>> 10) & 31, scale = mode === 1 ? 0n : mode === 3 ? 0n : immediate;
+    void scale;
+    const writeback = mode === 1 ? "post" as const : mode === 3 ? "pre" as const : "none" as const;
+    return { kind: load ? "loadPair" : "storePair", rt: word & 31, rt2, rn, offset: Number(immediate), writeback };
+  }
+  // Load/store with a register offset.
+  if (((word & 0x3b200c00) >>> 0) === 0x38200800 && ((word >>> 26) & 1) === 0) {
+    const sizeBits = (word >>> 30) & 3, opc = (word >>> 22) & 3, rm = (word >>> 16) & 31, option = (word >>> 13) & 7;
+    if (option !== 3 && option !== 2) throw new UnsupportedInstruction(address, word);
+    const size = (sizeBits === 0 ? 8 : sizeBits === 1 ? 16 : sizeBits === 2 ? 32 : 64) as 8 | 16 | 32 | 64;
+    const indexWidth: Width = option === 2 ? 32 : 64;
+    if (opc === 0) return { kind: "store", rt: word & 31, rn, rm, indexWidth, offset: 0, size };
+    if (opc === 1) return { kind: "load", rd: word & 31, rn, rm, indexWidth, offset: 0, size, signed: false };
+    if (opc === 2 && size !== 64) return { kind: "load", rd: word & 31, rn, rm, indexWidth, offset: 0, size, signed: true };
+    if (opc === 3 && size === 64) return { kind: "load", rd: word & 31, rn, rm, indexWidth, offset: 0, size: 64, signed: false };
+    throw new UnsupportedInstruction(address, word);
+  }
+  // Load/store with an unsigned immediate offset.
+  if (((word & 0x3b000000) >>> 0) === 0x39000000 && ((word >>> 26) & 1) === 0) {
+    const sizeBits = (word >>> 30) & 3, opc = (word >>> 22) & 3;
+    const size = (sizeBits === 0 ? 8 : sizeBits === 1 ? 16 : sizeBits === 2 ? 32 : 64) as 8 | 16 | 32 | 64;
+    const offset = ((word >>> 10) & 0xfff) * (size / 8);
+    if (opc === 0) return { kind: "store", rt: word & 31, rn, offset, size };
+    if (opc === 1) return { kind: "load", rd: word & 31, rn, offset, size, signed: false };
+    if (opc === 2 && size !== 64) return { kind: "load", rd: word & 31, rn, offset, size, signed: true };
+    if (opc === 3 && size === 64) return { kind: "load", rd: word & 31, rn, offset, size: 64, signed: false };
+    throw new UnsupportedInstruction(address, word);
   }
   // Branches.
   if (((word & 0xfc000000) >>> 0) === 0x14000000) return { kind: "branch", target: address + signExtend26((word & 0x03ffffff) << 2) };
@@ -89,12 +186,12 @@ export function decode(address: number, word: number): Instruction {
     return { kind: "branchCond", condition, target: address + signExtend19((word >>> 5) & 0x7ffff) };
   }
   if (((word & 0x7e000000) >>> 0) === 0x34000000) {
-    const is64 = ((word >>> 31) & 1) === 1, branchIfZero = ((word >>> 24) & 1) === 0;
-    if (!is64) throw new UnsupportedInstruction(address, word);
-    return { kind: "compareZero", register: rd, branchIfZero, target: address + signExtend19((word >>> 5) & 0x7ffff) };
+    const branchIfZero = ((word >>> 24) & 1) === 0;
+    return { kind: "compareZero", register: rd, branchIfZero, target: address + signExtend19((word >>> 5) & 0x7ffff), width };
   }
   throw new UnsupportedInstruction(address, word);
 }
 
-function signExtend19(value: number): number { return (value << 13) >> 13 << 2; }
-function signExtend26(value: number): number { return (value << 6) >> 6; }
+function signExtend(value: number, bits: number): number { return (value << (32 - bits)) >> (32 - bits); }
+function signExtend19(value: number): number { return signExtend(value, 19) << 2; }
+function signExtend26(value: number): number { return signExtend(value, 26); }

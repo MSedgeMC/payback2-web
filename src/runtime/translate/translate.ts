@@ -1,12 +1,13 @@
 import { Code, I64, OP, buildModule } from "./wasm.ts";
+import type { LoadKind, StoreKind } from "./wasm.ts";
 import { decode, UnsupportedInstruction } from "./arm64.ts";
 import type { Condition, Instruction } from "./arm64.ts";
 
 // The register file lives in linear memory so the host can seed and inspect it.
 // Offsets: x0..x30 = 0..247, sp = 248, nzcv = 256, pc = 264.
 export const REGISTER_FILE_BYTES = 34 * 8, STACK_POINTER_OFFSET = 31 * 8, FLAGS_OFFSET = 32 * 8, PC_OFFSET = 33 * 8;
-const SP = 31, FLAGS = 32, PC = 33, T0 = 34, T1 = 35, T2 = 36;
-const LOCAL_COUNT = 37;
+const SP = 31, FLAGS = 32, PC = 33, T0 = 34, T1 = 35, T2 = 36, T3 = 37, INDEX = 38;
+const LOCAL_COUNT = 39;
 const FLAG_N = 1n << 31n, FLAG_Z = 1n << 30n, FLAG_C = 1n << 29n, FLAG_V = 1n << 28n;
 const I64_AND = 0x83, I64_SHR_U = 0x88, I32_AND = 0x71, I32_OR = 0x72;
 
@@ -49,10 +50,17 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
 
   const count = blocks.length, body = new Code();
   for (let local = 0; local < 34; local++) { body.i32(local * 8); body.load("i64", 0); body.set(local); }
+  // Dispatch on a block index, resolving the entry pc once per call so that re-entry at an
+  // arbitrary address (a returned-to caller) still lands on the right block.
+  body.i64(0n); body.set(INDEX);
+  for (let index = 1; index < count; index++) {
+    body.get(PC); body.i64(BigInt(addresses[index]!)); body.raw(OP.eq64);
+    body.ifThen(); body.i64(BigInt(index)); body.set(INDEX); body.end();
+  }
   body.block();                                   // EXIT
   body.loop();                                    // DISPATCH
   for (let index = count - 1; index >= 0; index--) body.block();
-  body.get(PC); body.raw(OP.wrapI64);
+  body.get(INDEX); body.raw(OP.wrapI64);
   body.brTable(Array.from({ length: count }, (_, index) => index), count + 1);
   const dispatchDepth = (index: number): number => count - 1 - index;
   const exitDepth = (index: number): number => count - index;
@@ -74,31 +82,59 @@ function emitBlock(body: Code, block: Decoded[], context: {
 }): void {
   // Branches emitted inside an `if` sit one scope deeper, so the depth must account for it.
   const jump = (target: number, nested = 0): void => {
-    body.i64(BigInt(target)); body.set(PC);
-    body.br((context.indexOf.has(target) ? context.dispatch : context.exit) + nested);
+    const block = context.indexOf.get(target);
+    if (block === undefined) { body.i64(BigInt(target)); body.set(PC); body.br(context.exit + nested); return; }
+    body.i64(BigInt(block)); body.set(INDEX); body.br(context.dispatch + nested);
   };
+  const leave = (pc: number): void => { body.i64(BigInt(pc)); body.set(PC); body.br(context.exit); };
+  const widthMask = (local: number, width: 32 | 64): void => {
+    if (width === 64) return;
+    body.get(local); body.i64(0xffffffffn); body.raw(I64_AND); body.set(local);
+  };
+  // Register 31 is SP in add/sub immediate form and ZR elsewhere.
+  const operand = (register: number, spIsOperand: boolean): void => {
+    if (register === 31) { if (spIsOperand) body.get(SP); else body.i64(0n); } else body.get(register);
+  };
+  const shifted = (register: number, shift: "lsl" | "lsr" | "asr", amount: number): void => {
+    operand(register, false);
+    if (!amount) return;
+    body.i64(BigInt(amount));
+    body.raw(shift === "lsl" ? OP.shl64 : shift === "lsr" ? OP.shrU64 : OP.shrS64);
+  };
+  const store = (rd: number, spIsOperand: boolean, width: 32 | 64): void => {
+    widthMask(T2, width);
+    if (rd === 31) { if (spIsOperand) { body.get(T2); body.set(SP); } return; }
+    body.get(T2); body.set(rd);
+  };
+
   for (const instruction of block) {
     switch (instruction.kind) {
       case "nop": break;
-      case "unsupported":
-        // Leave the address program counter intact so the interpreter handles it.
-        body.i64(BigInt(instruction.address)); body.set(PC); body.br(context.exit); return;
-      case "branchLink": body.i64(BigInt(instruction.address)); body.set(PC); body.br(context.exit); return;
+      case "unsupported": leave(instruction.address); return;
       case "return": body.get(30); body.set(PC); body.br(context.exit); return;
+      case "branchReg": body.get(instruction.rn); body.set(PC); body.br(context.exit); return;
+      case "branchLinkReg":
+        body.i64(BigInt(instruction.address + 4)); body.set(30);
+        body.get(instruction.rn); body.set(PC); body.br(context.exit); return;
+      case "branchLink":
+        // The driver re-enters for the callee, which keeps the guest call stack in one place.
+        body.i64(BigInt(instruction.address + 4)); body.set(30);
+        leave(instruction.target); return;
       case "branch": jump(instruction.target); return;
-      case "branchCond": {
+      case "branchCond":
         emitCondition(body, instruction.condition);
         body.ifThen(); jump(instruction.target, 1); body.end();
         continue;
-      }
-      case "compareZero": {
+      case "compareZero":
         body.get(instruction.register);
+        if (instruction.width === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
         body.raw(OP.eqz64);
         if (!instruction.branchIfZero) body.raw(OP.eqz32);
         body.ifThen(); jump(instruction.target, 1); body.end();
         continue;
-      }
-      case "movz": body.i64(instruction.value); if (instruction.rd !== 31) body.set(instruction.rd); else body.drop(); break;
+      case "movz": case "movn":
+        if (instruction.rd === 31) break;
+        body.i64(instruction.value); body.set(instruction.rd); break;
       case "movk": {
         if (instruction.rd === 31) break;
         const mask = ~((0xffffn << BigInt(instruction.shift)) & 0xffffffffffffffffn);
@@ -107,38 +143,140 @@ function emitBlock(body: Code, block: Decoded[], context: {
         break;
       }
       case "addImm": case "subImm": case "addReg": case "subReg": {
-        const left = instruction.rn === 31 ? SP : instruction.rn;
         const subtract = instruction.kind === "subImm" || instruction.kind === "subReg";
-        body.get(left); body.set(T0);                                      // a survives a clobber of rn
-        if (instruction.kind === "addImm" || instruction.kind === "subImm") body.i64(instruction.immediate);
-        else body.get(instruction.rm);
-        body.set(T1);                                                      // b survives a clobber of rm
+        const immediateForm = instruction.kind === "addImm" || instruction.kind === "subImm";
+        operand(instruction.rn, immediateForm);
+        body.set(T0);
+        if (immediateForm) body.i64(instruction.immediate);
+        else shifted(instruction.rm, instruction.shift, instruction.amount);
+        body.set(T1);
         body.get(T0); body.get(T1); body.raw(subtract ? OP.sub64 : OP.add64); body.set(T2);
-        if (instruction.rd !== 31) { body.get(T2); body.set(instruction.rd); }
-        if (instruction.flags) emitFlags(body, subtract, T0, T1, T2);
+        store(instruction.rd, immediateForm && !instruction.flags, instruction.width);
+        // A 32-bit operation sets N and Z from the 32-bit result.
+        if (instruction.flags) emitFlags(body, subtract, T0, T1, T2, instruction.width);
         break;
       }
       case "andReg": case "orrReg": case "eorReg": {
-        body.get(instruction.rn); body.set(T0);
-        body.get(instruction.kind === "orrReg" ? instruction.rm : instruction.rm);
-        const operation = instruction.kind === "andReg" ? I64_AND : instruction.kind === "orrReg" ? OP.or64 : OP.xor64;
-        body.raw(operation); body.set(T2);
-        if (instruction.rd !== 31) { body.get(T2); body.set(instruction.rd); }
-        if (instruction.kind === "andReg" && instruction.flags) emitLogicFlags(body, T2);
+        // Both operands must stay on the operand stack for the binary instruction.
+        operand(instruction.rn, false);
+        operand(instruction.rm, false);
+        body.raw(instruction.kind === "andReg" ? I64_AND : instruction.kind === "orrReg" ? OP.or64 : OP.xor64);
+        body.set(T2);
+        store(instruction.rd, false, instruction.width);
+        if (instruction.kind === "andReg" && instruction.flags) emitLogicFlags(body, T2, instruction.width);
+        break;
+      }
+      case "madd": {
+        operand(instruction.rn, false); body.set(T0);
+        operand(instruction.rm, false); body.set(T1);
+        body.get(T0); body.get(T1); body.raw(OP.mul64); body.set(T2);
+        // MUL/MNEG use Ra = 31, which means the addend is zero (or the product is negated).
+        if (instruction.ra !== 31) { body.get(T2); body.get(instruction.ra); body.raw(instruction.subtract ? OP.sub64 : OP.add64); body.set(T2); }
+        else if (instruction.subtract) { body.i64(0n); body.get(T2); body.raw(OP.sub64); body.set(T2); }
+        store(instruction.rd, false, instruction.width);
+        break;
+      }
+      case "divide": {
+        // 32-bit signed division needs sign-extended operands, not zero-extended ones.
+        const extend = (register: number, target: number): void => {
+          operand(register, false); body.set(target);
+          if (instruction.width === 32 && instruction.signed) {
+            body.get(target); body.i64(32n); body.raw(OP.shl64); body.i64(32n); body.raw(OP.shrS64); body.set(target);
+          } else if (instruction.width === 32) {
+            body.get(target); body.i64(0xffffffffn); body.raw(I64_AND); body.set(target);
+          }
+        };
+        extend(instruction.rn, T0); extend(instruction.rm, T1);
+        body.get(T0); body.get(T1); body.raw(instruction.signed ? OP.divS64 : OP.divU64); body.set(T2);
+        store(instruction.rd, false, instruction.width);
+        break;
+      }
+      case "shiftReg": {
+        operand(instruction.rn, false); body.set(T0);
+        operand(instruction.rm, false); body.set(T1);
+        body.get(T0); body.get(T1); body.raw(instruction.shift === "lsl" ? OP.shl64 : instruction.shift === "lsr" ? OP.shrU64 : OP.shrS64);
+        body.set(T2);
+        store(instruction.rd, false, instruction.width);
+        break;
+      }
+      case "bitfield": {
+        operand(instruction.rn, false); body.set(T0);
+        const bits = instruction.width, immr = instruction.immediateR, imms = instruction.immediateS;
+        const maskOf = (count: number): bigint => (1n << BigInt(count)) - 1n;
+        const fieldWidth = imms >= immr ? imms - immr + 1 : imms + 1;
+        if (imms >= immr) { body.get(T0); body.i64(BigInt(immr)); body.raw(OP.shrU64); }
+        else { body.get(T0); body.i64(maskOf(fieldWidth)); body.raw(I64_AND); body.i64(BigInt(bits - immr)); body.raw(OP.shl64); }
+        body.i64(maskOf(fieldWidth)); body.raw(I64_AND);
+        body.set(T2);
+        if (instruction.operation === "sbfm") {
+          const topBit = (imms >= immr ? fieldWidth - 1 : fieldWidth - 1 + (bits - immr));
+          const shift = 64 - (topBit + 1);
+          if (shift > 0) {
+            body.get(T2); body.i64(BigInt(shift)); body.raw(OP.shl64);
+            body.i64(BigInt(shift)); body.raw(OP.shrS64); body.set(T2);
+          }
+        }
+        store(instruction.rd, false, instruction.width);
+        break;
+      }
+      case "select": {
+        operand(instruction.rn, false); body.set(T0);
+        operand(instruction.rm, false); body.set(T1);
+        if (instruction.increment) { body.get(T1); body.i64(1n); body.raw(OP.add64); body.set(T1); }
+        if (instruction.invert) { body.get(T1); body.i64(-1n); body.raw(OP.xor64); body.set(T1); }
+        body.get(T0); body.get(T1);
+        emitCondition(body, instruction.condition); body.raw(OP.select);
+        body.set(T2);
+        store(instruction.rd, false, instruction.width);
         break;
       }
       case "load": {
-        body.get(instruction.rn === 31 ? SP : instruction.rn); body.raw(OP.wrapI64);
-        body.load("i64", instruction.offset);
-        if (instruction.rd !== 31) body.set(instruction.rd); else body.drop();
+        if (instruction.rd === 31) break;
+        operand(instruction.rn, true);
+        if (instruction.rm !== undefined) {
+          body.get(instruction.rm);
+          if (instruction.indexWidth === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
+          body.raw(OP.add64);
+        }
+        body.raw(OP.wrapI64);
+        body.load(loadKind(instruction.size, instruction.signed), instruction.offset);
+        body.set(instruction.rd);
         break;
       }
       case "store": {
-        body.get(instruction.rn === 31 ? SP : instruction.rn); body.raw(OP.wrapI64);
+        operand(instruction.rn, true);
+        if (instruction.rm !== undefined) {
+          body.get(instruction.rm);
+          if (instruction.indexWidth === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
+          body.raw(OP.add64);
+        }
+        body.raw(OP.wrapI64);
         if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt);
-        body.store("i64", instruction.offset);
+        body.store(storeKind(instruction.size), instruction.offset);
         break;
       }
+      case "loadPair": case "storePair": {
+        operand(instruction.rn, true); body.raw(OP.wrapI64); body.set(T3);
+        if (instruction.kind === "loadPair") {
+          if (instruction.rt !== 31) { body.get(T3); body.load("i64", instruction.offset); body.set(instruction.rt); }
+          if (instruction.rt2 !== 31) { body.get(T3); body.load("i64", instruction.offset + 8); body.set(instruction.rt2); }
+        } else {
+          body.get(T3); if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt); body.store("i64", instruction.offset);
+          body.get(T3); if (instruction.rt2 === 31) body.i64(0n); else body.get(instruction.rt2); body.store("i64", instruction.offset + 8);
+        }
+        if (instruction.writeback !== "none") {
+          body.get(instruction.rn === 31 ? SP : instruction.rn);
+          body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+          body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        break;
+      }
+      case "address":
+        if (instruction.rd !== 31) { body.i64(instruction.value); body.set(instruction.rd); }
+        break;
+      case "loadLiteral":
+        if (instruction.rd !== 31) { body.i64(instruction.value); body.set(instruction.rd); }
+        break;
       default: throw new Error(`Translator cannot emit ${(instruction as Decoded).kind}`);
     }
   }
@@ -173,10 +311,21 @@ function emitCondition(body: Code, condition: Condition): void {
   }
 }
 
+function loadKind(size: 8 | 16 | 32 | 64, signed: boolean): LoadKind {
+  if (size === 64) return "i64";
+  if (size === 32) return signed ? "i64_32s" : "i64_32u";
+  if (size === 16) return signed ? "i64_16s" : "i64_16u";
+  return signed ? "i64_8s" : "i64_8u";
+}
+function storeKind(size: 8 | 16 | 32 | 64): StoreKind {
+  return size === 64 ? "i64" : size === 32 ? "i64_32" : size === 16 ? "i64_16" : "i64_8";
+}
+
 /** Emits NZCV for an add or subtract from saved operands and the saved result. */
-function emitFlags(body: Code, subtract: boolean, aLocal: number, bLocal: number, rLocal: number): void {
+function emitFlags(body: Code, subtract: boolean, aLocal: number, bLocal: number, rLocal: number, width: 32 | 64 = 64): void {
+  const signBit = BigInt(width - 1);
   // N: sign of the result.
-  body.get(rLocal); body.i64(63n); body.raw(I64_SHR_U); body.i64(31n); body.raw(OP.shl64);
+  body.get(rLocal); body.i64(signBit); body.raw(I64_SHR_U); body.i64(31n); body.raw(OP.shl64);
   // Z: result is zero.
   body.get(rLocal); body.raw(OP.eqz64); body.raw(OP.extendI32U); body.i64(30n); body.raw(OP.shl64);
   body.raw(OP.or64);
@@ -187,13 +336,13 @@ function emitFlags(body: Code, subtract: boolean, aLocal: number, bLocal: number
   // V: signed overflow from the operands and the result.
   if (subtract) { body.get(aLocal); body.get(bLocal); body.raw(OP.xor64); body.get(aLocal); body.get(rLocal); body.raw(OP.xor64); }
   else { body.get(aLocal); body.get(rLocal); body.raw(OP.xor64); body.get(bLocal); body.get(rLocal); body.raw(OP.xor64); }
-  body.raw(I64_AND); body.i64(63n); body.raw(I64_SHR_U); body.i64(28n); body.raw(OP.shl64); body.raw(OP.or64);
+  body.raw(I64_AND); body.i64(signBit); body.raw(I64_SHR_U); body.i64(28n); body.raw(OP.shl64); body.raw(OP.or64);
   body.set(FLAGS);
 }
 
 /** Logical operations define N and Z only; C and V are cleared. */
-function emitLogicFlags(body: Code, rLocal: number): void {
-  body.get(rLocal); body.i64(63n); body.raw(I64_SHR_U); body.i64(31n); body.raw(OP.shl64);
+function emitLogicFlags(body: Code, rLocal: number, width: 32 | 64 = 64): void {
+  body.get(rLocal); body.i64(BigInt(width - 1)); body.raw(I64_SHR_U); body.i64(31n); body.raw(OP.shl64);
   body.get(rLocal); body.raw(OP.eqz64); body.raw(OP.extendI32U); body.i64(30n); body.raw(OP.shl64);
   body.raw(OP.or64); body.set(FLAGS);
 }

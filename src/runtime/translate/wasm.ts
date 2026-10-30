@@ -4,6 +4,13 @@
 
 export const I32 = 0x7f, I64 = 0x7e, EMPTY_BLOCK = 0x40;
 
+export type LoadKind = "i32" | "i64" | "i64_8s" | "i64_8u" | "i64_16s" | "i64_16u" | "i64_32s" | "i64_32u";
+export type StoreKind = "i32" | "i64" | "i64_8" | "i64_16" | "i64_32";
+const LOAD_OPCODES: Record<LoadKind, number> = { i32: 0x28, i64: 0x29, i64_8s: 0x30, i64_8u: 0x31, i64_16s: 0x32, i64_16u: 0x33, i64_32s: 0x34, i64_32u: 0x35 };
+const STORE_OPCODES: Record<StoreKind, number> = { i32: 0x36, i64: 0x37, i64_8: 0x3c, i64_16: 0x3d, i64_32: 0x3e };
+// Natural alignment in bytes is expressed as log2 for the memarg immediate.
+const ALIGN: Record<number, number> = { 0x28: 2, 0x29: 3, 0x30: 0, 0x31: 0, 0x32: 1, 0x33: 1, 0x34: 2, 0x35: 2, 0x36: 2, 0x37: 3, 0x3c: 0, 0x3d: 1, 0x3e: 2 };
+
 export function uleb(value: number): number[] {
   if (!Number.isInteger(value) || value < 0) throw new RangeError("uleb expects a non-negative integer");
   const bytes: number[] = [];
@@ -52,12 +59,12 @@ export class Code {
   call(index: number): this { this.bytes.push(0x10, ...uleb(index)); return this; }
   drop(): this { this.bytes.push(0x1a); return this; }
   ret(): this { this.bytes.push(0x0f); return this; }
-  load(kind: "i32" | "i64" | "i64_32u", offset: number): this {
-    this.bytes.push(kind === "i32" ? 0x28 : kind === "i64" ? 0x29 : 0x35, ...uleb(3), ...uleb(offset));
+  load(kind: LoadKind, offset: number): this {
+    this.bytes.push(LOAD_OPCODES[kind], ...uleb(ALIGN[LOAD_OPCODES[kind]!] ?? 0), ...uleb(offset));
     return this;
   }
-  store(kind: "i32" | "i64" | "i64_32", offset: number): this {
-    this.bytes.push(kind === "i32" ? 0x36 : kind === "i64" ? 0x37 : 0x3e, ...uleb(3), ...uleb(offset));
+  store(kind: StoreKind, offset: number): this {
+    this.bytes.push(STORE_OPCODES[kind], ...uleb(ALIGN[STORE_OPCODES[kind]!] ?? 0), ...uleb(offset));
     return this;
   }
 }
@@ -66,7 +73,7 @@ export class Code {
 export const OP = {
   eqz64: 0x50, eq64: 0x51, ne64: 0x52, ltS64: 0x53, ltU64: 0x54, gtS64: 0x55, gtU64: 0x56,
   leS64: 0x57, leU64: 0x58, geS64: 0x59, geU64: 0x5a,
-  eqz32: 0x45, ne32: 0x47,
+  eqz32: 0x45, ne32: 0x47, divS64: 0x7f, divU64: 0x80, select: 0x1b,
   add64: 0x7c, sub64: 0x7d, mul64: 0x7e, and64: 0x83, or64: 0x84, xor64: 0x85,
   shl64: 0x86, shrS64: 0x87, shrU64: 0x88,
   wrapI64: 0xa7, extendI32U: 0xad, extendI32S: 0xac,
