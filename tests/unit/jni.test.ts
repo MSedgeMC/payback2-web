@@ -202,3 +202,21 @@ test("JNI class and method lookup use isolated DEX declarations with their actua
     assert.equal(wrongKind.status, "blocked-import");
   } finally { jni.dispose(); session.dispose(); cpu.unmap(data, 4096n); cpu.close(); }
 });
+
+test("the JVM accepts a created guest thread and still rejects a foreign thread pointer", async () => {
+  const cpu = await createRuntime(), session = new NativeSession(cpu);
+  try {
+    const jni = new JniEnvironment(cpu, session.imports), original = cpu.readRegister("tpidr_el0");
+    try {
+      const call = (register: bigint) => {
+        cpu.writeRegister("x0", jni.environmentAddress); cpu.writeRegister("tpidr_el0", register); cpu.writeRegister("x30", 0x7fff0000n);
+        const pointer = cpu.copyOut(jni.vmAddress + 512n + 4n * 8n, 8), address = new DataView(pointer.buffer).getBigUint64(0, true);
+        return cpu.run(address, 0x7fff0000n, 4);
+      };
+      // The creating thread is accepted.
+      assert.equal(session.imports.handleInterrupt(call(original).pc), true);
+      // A thread pointer nobody owns is rejected instead of silently accepted.
+      assert.throws(() => session.imports.handleInterrupt(call(0x1234567n).pc), /Foreign or detached JNIEnv/);
+    } finally { cpu.writeRegister("tpidr_el0", original); jni.dispose(); }
+  } finally { session.dispose(); cpu.close(); }
+});

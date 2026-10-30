@@ -153,6 +153,11 @@ export class GuestThreads {
     return thread?.state === "finished" ? thread.result : undefined;
   }
 
+  /** True when a thread pointer belongs to a live guest thread created here. */
+  isThreadPointer(value: bigint): boolean {
+    return this.threads.some(thread => thread.tls === value);
+  }
+
   /** Validates a thread handle without dereferencing it. */
   has(handle: bigint): boolean { return this.threads.some(thread => thread.handle === handle); }
 

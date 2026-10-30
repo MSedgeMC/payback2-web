@@ -279,7 +279,7 @@ export class NativeImports {
         this.destructors.push({ callback, argument: this.cpu.readRegister("x1"), dso: this.cpu.readRegister("x2") });
         this.cpu.writeRegister("x0", 0n);
       }
-    } else return false;
+    } else { this.explain(`unhandled libc entry ${symbol.name}`); return false; }
     this.cpu.writeRegister("pc", this.cpu.readRegister("x30"));
     return true;
   }

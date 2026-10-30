@@ -447,7 +447,7 @@ export class JniEnvironment {
 
   private runJava(execution: JavaExecution, complete: (value: JavaDatum) => NativeDispatch,
                   step = execution.next()): NativeDispatch {
-    if (this.disposed || !this.java || this.cpu.readRegister("tpidr_el0") !== this.threadPointer) throw new Error("Foreign or disposed managed JNI call");
+    if (this.disposed || !this.java || !this.onLiveThread()) throw new Error("Foreign or disposed managed JNI call");
     if (step.done) return complete(step.value);
     const request = step.value;
     if (request.kind === "wait") return { kind: "wait", ready: request.ready,
@@ -530,16 +530,26 @@ export class JniEnvironment {
     if (!global) for (const frame of this.localFrames) frame.delete(reference);
   }
 
+  /**
+   * A JNIEnv belongs to the process, so any live guest thread may use it; the thread that
+   * created the environment and every thread created through pthread_create qualify.
+   */
+  private onLiveThread(): boolean {
+    const threadPointer = this.cpu.readRegister("tpidr_el0");
+    return threadPointer === this.threadPointer || this.imports.threads.isThreadPointer(threadPointer);
+  }
+
   private assertEnvironment(): void {
-    if (this.disposed || this.cpu.readRegister("x0") !== this.environmentAddress ||
-        this.cpu.readRegister("tpidr_el0") !== this.threadPointer) throw new Error("Foreign or detached JNIEnv");
+    if (this.disposed || this.cpu.readRegister("x0") !== this.environmentAddress || !this.onLiveThread()) {
+      throw new Error("Foreign or detached JNIEnv");
+    }
   }
 
   private getEnvironment(): void {
     if (this.disposed || this.cpu.readRegister("x0") !== this.vmAddress) throw new Error("Foreign JavaVM");
     const requestedVersion = Number(BigInt.asUintN(32, this.cpu.readRegister("x2")));
     const result = !isSupportedJniVersion(requestedVersion) ? -3
-      : this.cpu.readRegister("tpidr_el0") !== this.threadPointer ? -2 : 0;
+      : !this.onLiveThread() ? -2 : 0;
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, result === 0 ? this.environmentAddress : 0n, true);
     writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), bytes);
