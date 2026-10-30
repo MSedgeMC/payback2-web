@@ -15,10 +15,11 @@ native threads. Execution currently stops on an unsynchronised condition
 variable wait (`pthread_cond_wait`). Engine initialization, rendering, gameplay
 input, and audio remain unfinished.
 
-Measured execution throughput is the project's largest open problem: the
-AArch64 interpreter reaches roughly 1.5 million guest instructions per second,
-about three orders of magnitude below what a real-time 3D frame requires. See
-`docs/PERFORMANCE.md`.
+Execution is moving from interpretation to an ahead-of-time translator: AArch64 is
+decoded and emitted as WebAssembly, with basic blocks dispatched inside the module.
+The first slice measures roughly 1,950-2,653 million guest instructions per second
+against 1.5 million for the interpreter. It currently covers a small 64-bit integer
+subset and is not yet connected to the engine. See `docs/PERFORMANCE.md`.
 
 The browser interface reports loading and compatibility diagnostics. It does
 not yet provide a playable scene.
@@ -31,6 +32,8 @@ not yet provide a playable scene.
 - JNI class and method lookup, native registration, typed references, strings, arrays, byte regions, constructors, and the instance call family.
 - Direct guest kernel syscalls (clock, identity, descriptors, process map, entropy) with unimplemented numbers reported by name.
 - A read-only guest file system over the user's package, and cooperative native threads.
+- An AArch64-to-WebAssembly translator with an in-module block dispatcher, and a measured
+  comparison against interpretation.
 - Explicit diagnostics for unsupported inputs, memory access, and native or Java calls.
 - Unit and Chromium integration checks using synthetic fixtures; game data is excluded from CI.
 

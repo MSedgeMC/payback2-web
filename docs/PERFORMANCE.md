@@ -20,12 +20,34 @@ Measured through real startup (80M-instruction budget, 20,000-instruction slices
 entry, so 500-instruction slices lose about half the time to it; startup uses
 20,000-instruction slices to keep that near 2%.
 
+## Ahead-of-time translation to WebAssembly
+
+`src/runtime/translate/` decodes AArch64 and emits a WASM module whose basic blocks
+are dispatched by an in-module `br_table` loop, so a hot loop pays no host boundary
+crossing per instruction or per block. Measured with `node tools/benchmark_translate.ts`
+(50,000,000 iterations, same fixtures as the interpreter table):
+
+| Mix | Interpreted | Translated | Speedup |
+| --- | --- | --- | --- |
+| integer and branch | 1.78 MIPS | 1,950 MIPS | ~1,100x |
+| load, store, integer and branch | 1.45 MIPS | 2,653 MIPS | ~1,800x |
+
+This removes the interpreter as the blocking constraint: the translated core is fast
+enough that a 3D frame becomes a question of how much work the game does, not of
+instruction dispatch.
+
+**This is an upper bound, not a frame-rate promise.** The fixtures are tight loops
+with registers in WASM locals, no indirect branches, no host calls, no
+floating-point or SIMD. Real engine code will be slower, and the translator
+currently covers a small 64-bit integer subset (arithmetic, compare, branch,
+load/store, move-wide, return). Everything else falls back with the address reported
+in `TranslationResult.unsupported`.
+
 ## Consequence for gameplay
 
-1.5 MIPS is roughly three orders of magnitude short of a real-time 3D frame. The
-interpreter cannot deliver playable frames; compatibility work continues first
-because a frame must exist before it can be measured, but replacing the core is
-a prerequisite for the gameplay milestone.
+The interpreted path (1.5 MIPS) could never deliver a frame. The translated path
+can, so the remaining work is coverage and integration rather than a different
+execution strategy.
 
 ## Where the time actually goes
 
