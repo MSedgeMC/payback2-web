@@ -53,7 +53,22 @@ in `TranslationResult.unsupported`.
 | Unicorn interpreter | 904 ms | 2 MIPS |
 | Translated WASM | 0.46 ms | 3,043 MIPS |
 
-**1,922x**, with a bit-identical hash, flags and register file.
+**1,922x**, with a bit-identical hash, flags and register file. Repeated after the
+floating-point work: 2,105x, 2,927 MIPS.
+
+## Validation against real engine functions
+
+`node tools/validate_engine_functions.ts` picks the engine's leaf functions, executes
+each under both engines with an identical memory image and register seed, and compares
+all 31 registers, the flags, and a checksum of the data region:
+
+- 701 candidate leaf functions, 349 executed to completion in both engines
+- **349 of 349 produced identical registers, flags, and memory side effects**
+
+This found five real translator bugs that unit tests had missed (conditional-select
+condition bits, block leaders for bit-test branches, post-index displacement applied
+to the wrong side, negative displacements emitted as memmap immediates, and a crash on
+undefined bitmask immediates).
 
 ## Translation coverage
 
