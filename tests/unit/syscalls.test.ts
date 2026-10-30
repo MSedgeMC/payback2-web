@@ -111,3 +111,30 @@ test("guest fstat describes an open synthetic file with the arm64 stat layout", 
     assert.equal(call(SYS.fstat, [descriptor, 8n]), -14n);
   } finally { syscalls.dispose(); for (const address of [code, data, buffer, stat]) cpu.unmap(address, 4096n); cpu.close(); }
 });
+
+test("guest random devices stream host entropy and libc syscall forwards to the table", async () => {
+  const cpu = await createRuntime(), syscalls = new GuestSyscalls(cpu);
+  const code = 0x30000n, data = 0x40000n, buffer = 0x41000n;
+  try {
+    cpu.map(code, 4096n, 5); cpu.map(data, 4096n, 3); cpu.map(buffer, 4096n, 3);
+    cpu.copyIn(code, new Uint8Array([0x01, 0x00, 0x00, 0xd4]));
+    cpu.copyIn(data, new TextEncoder().encode("/dev/urandom\0"));
+    const call = (number: number, args: bigint[] = []) => {
+      cpu.writeRegister("x8", BigInt(number)); args.forEach((value, index) => cpu.writeRegister(`x${index}` as `x${number}`, value));
+      syscalls.handle(code + 4n); return BigInt.asIntN(64, cpu.readRegister("x0"));
+    };
+    const descriptor = call(SYS.openat, [0n, data, 0n, 0n]);
+    assert.ok(descriptor >= 3n);
+    assert.equal(call(SYS.read, [descriptor, buffer, 32n]), 32n);
+    const first = cpu.copyOut(buffer, 32);
+    assert.ok(first.some(byte => byte !== 0), "the stream must not be all zeroes");
+    call(SYS.read, [descriptor, buffer, 32n]);
+    assert.notDeepEqual([...cpu.copyOut(buffer, 32)], [...first], "consecutive reads return new entropy");
+    // libc syscall(number, ...) shifts arguments into the kernel convention.
+    cpu.writeRegister("x0", BigInt(SYS.getpid)); cpu.writeRegister("x1", 999n);
+    assert.equal(syscalls.redirect(SYS.getpid), true);
+    assert.equal(cpu.readRegister("x0"), 1n);
+    assert.equal(syscalls.redirect(4242), false);
+    assert.equal(syscalls.unsupportedSyscall, "syscall_4242");
+  } finally { syscalls.dispose(); for (const address of [code, data, buffer]) cpu.unmap(address, 4096n); cpu.close(); }
+});

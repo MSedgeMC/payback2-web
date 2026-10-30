@@ -132,7 +132,12 @@ export class NativeImports {
       this.explain(`${symbol.version?.library ?? "unknown"}:${symbol.version?.name ?? "unversioned"} ${symbol.name}`);
       return false;
     }
-    if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
+    if (symbol.name === "syscall") {
+      if (!this.syscalls.redirect(Number(BigInt.asUintN(32, this.cpu.readRegister("x0"))))) {
+        this.explain(`syscall ${this.syscalls.unsupportedSyscall ?? "unknown"}`);
+        return false;
+      }
+    } else if (symbol.name === "__errno") this.cpu.writeRegister("x0", this.errnoAddress);
     else if (symbol.name === "malloc" || symbol.name === "calloc") {
       this.heap ??= new GuestHeap(this.cpu);
       const size = this.cpu.readRegister("x0") * (symbol.name === "calloc" ? this.cpu.readRegister("x1") : 1n);

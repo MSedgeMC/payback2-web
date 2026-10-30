@@ -25,6 +25,9 @@ const CLOCK_REALTIME = 0, CLOCK_REALTIME_COARSE = 5, CLOCK_REALTIME_ALARM = 8;
 const EBADF = 9, EFAULT = 14, EINVAL = 22, ENOENT = 2;
 
 type Timespec = { seconds: number; nanoseconds: number };
+/** Synthetic file contents: fixed bytes, or an endless host random stream. */
+type GuestSource = { kind: "bytes"; bytes: Uint8Array } | { kind: "random" };
+type GuestDescriptor = { path: string; source: GuestSource; position: number };
 
 function monotonicTimespec(): Timespec {
   const value = performance.now(), seconds = Math.floor(value / 1000);
@@ -49,7 +52,7 @@ export class GuestSyscalls {
   /** Environment facts the guest was told about, kept visible rather than silent. */
   private readonly noticeList: string[] = [];
   /** Open descriptors over synthetic in-process files; the browser guest has no kernel file tree. */
-  private readonly descriptors = new Map<number, { path: string; bytes: Uint8Array; position: number }>();
+  private readonly descriptors = new Map<number, GuestDescriptor>();
   private nextDescriptor = 3;
   private disposed = false;
 
@@ -110,27 +113,44 @@ export class GuestSyscalls {
    * table, so the guest sees a truthful description of its address space rather than an
    * invented one. Any other path has no backing store and reports ENOENT.
    */
-  private virtualFile(path: string): Uint8Array | undefined {
+  private virtualFile(path: string): GuestSource | undefined {
+    // The browser guest has a real CSPRNG, so /dev/urandom serves actual random bytes.
+    if (path === "/dev/urandom" || path === "/dev/random") return { kind: "random" };
     if (path !== "/proc/self/maps" && path !== "/proc/self/smaps") return undefined;
     const lines = this.cpu.regions.map(region => {
       const permissions = `${region.permissions & 1 ? "r" : "-"}${region.permissions & 2 ? "w" : "-"}${region.permissions & 4 ? "x" : "-"}p`;
       const start = region.address.toString(16).padStart(8, "0"), end = (region.address + region.size).toString(16).padStart(8, "0");
       return `${start}-${end} ${permissions} 00000000 00:00 0 `;
     });
-    return new TextEncoder().encode(lines.length ? `${lines.join("\n")}\n` : "");
+    return { kind: "bytes", bytes: new TextEncoder().encode(lines.length ? `${lines.join("\n")}\n` : "") };
+  }
+
+  /**
+   * Serves libc's `syscall(number, ...)` wrapper: the direct kernel number moves to x8 and
+   * the remaining argument registers shift down to the Linux syscall convention.
+   */
+  redirect(number: number): boolean {
+    if (this.disposed) throw new Error("Guest syscalls are disposed");
+    this.blocked = undefined;
+    const args = [1, 2, 3, 4, 5].map(index => this.cpu.readRegister(`x${index}` as `x${number}`));
+    this.cpu.writeRegister("x8", BigInt.asUintN(32, BigInt(number)));
+    args.forEach((value, index) => this.cpu.writeRegister(`x${index}` as `x${number}`, value));
+    if (this.dispatch(number)) return true;
+    this.blocked = syscallName(number);
+    return false;
   }
 
   private openAt(): boolean {
     let path = "";
     try { path = new TextDecoder().decode(readCString(this.cpu, this.cpu.readRegister("x1"), 256)); } catch { /* an unreadable path is still missing */ }
-    const bytes = path ? this.virtualFile(path) : undefined;
-    if (!bytes) {
+    const source = path ? this.virtualFile(path) : undefined;
+    if (!source) {
       this.notice(`openat(${path || "<unreadable>"}) reported ENOENT`);
       this.cpu.writeRegister("x0", BigInt(-ENOENT));
       return true;
     }
     const descriptor = this.nextDescriptor++;
-    this.descriptors.set(descriptor, { path, bytes, position: 0 });
+    this.descriptors.set(descriptor, { path, source, position: 0 });
     this.cpu.writeRegister("x0", BigInt(descriptor));
     return true;
   }
@@ -147,8 +167,10 @@ export class GuestSyscalls {
     if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
     const count = Number(BigInt.asUintN(64, this.cpu.readRegister("x2")));
     if (!Number.isSafeInteger(count) || count < 0) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
-    const available = Math.min(count, file.bytes.length - file.position);
-    const chunk = file.bytes.subarray(file.position, file.position + available);
+    const available = file.source.kind === "random" ? Math.min(count, 4096)
+      : Math.min(count, file.source.bytes.length - file.position);
+    const chunk = file.source.kind === "random" ? crypto.getRandomValues(new Uint8Array(available))
+      : file.source.bytes.subarray(file.position, file.position + available);
     try { writeGuestBytes(this.cpu, this.cpu.readRegister("x1"), chunk); }
     catch { this.cpu.writeRegister("x0", BigInt(-EFAULT)); return true; }
     file.position += available;
@@ -160,9 +182,10 @@ export class GuestSyscalls {
     const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0"))), file = this.descriptors.get(descriptor);
     if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
     const offset = BigInt.asIntN(64, this.cpu.readRegister("x1")), origin = Number(BigInt.asIntN(32, this.cpu.readRegister("x2")));
-    const base = origin === 0 ? 0 : origin === 1 ? file.position : origin === 2 ? file.bytes.length : undefined;
+    const size = file.source.kind === "random" ? 0 : file.source.bytes.length;
+    const base = origin === 0 ? 0 : origin === 1 ? file.position : origin === 2 ? size : undefined;
     const position = base === undefined ? -1n : BigInt(base) + offset;
-    if (position < 0n || position > BigInt(file.bytes.length)) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
+    if (position < 0n || position > BigInt(size)) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
     file.position = Number(position);
     this.cpu.writeRegister("x0", position);
     return true;
@@ -176,14 +199,15 @@ export class GuestSyscalls {
     const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0"))), file = this.descriptors.get(descriptor);
     if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
     const bytes = new Uint8Array(128), view = new DataView(bytes.buffer);
-    const regularFile = 0o100000, permissions = 0o444;
+    const source = file.source, random = source.kind === "random", size = source.kind === "random" ? 0 : source.bytes.length;
+    const kind = random ? 0o020000 : 0o100000, permissions = random ? 0o666 : 0o444;
     view.setBigUint64(0, 0n, true);                       // st_dev
     view.setBigUint64(8, BigInt(descriptor), true);        // st_ino
-    view.setUint32(16, regularFile | permissions, true);   // st_mode
+    view.setUint32(16, kind | permissions, true);          // st_mode
     view.setUint32(20, 1, true);                           // st_nlink
-    view.setBigInt64(48, BigInt(file.bytes.length), true); // st_size
+    view.setBigInt64(48, BigInt(size), true);              // st_size
     view.setInt32(56, 4096, true);                         // st_blksize
-    view.setBigInt64(64, BigInt(Math.ceil(file.bytes.length / 512)), true); // st_blocks
+    view.setBigInt64(64, BigInt(Math.ceil(size / 512)), true); // st_blocks
     try { writeGuestBytes(this.cpu, target, bytes); }
     catch { this.cpu.writeRegister("x0", BigInt(-EFAULT)); return true; }
     this.cpu.writeRegister("x0", 0n);
