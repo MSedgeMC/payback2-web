@@ -7,7 +7,7 @@ import { readCString, readGuestBytes, writeGuestBytes } from "./guest-memory.ts"
 // a raw kernel call, which happens in the protected dependency rather than in libc.
 export const SYS = {
   gettimeofday: 169, clock_gettime: 113, clock_getres: 114, getpid: 172, gettid: 178, set_tid_address: 96,
-  openat: 56, close: 57, read: 63, lseek: 62, faccessat: 48, newfstatat: 79, readlinkat: 78,
+  openat: 56, close: 57, read: 63, lseek: 62, fstat: 80, faccessat: 48, newfstatat: 79, readlinkat: 78,
 } as const;
 
 // Only numbers that this module can name; unknown numbers stay visible as their index.
@@ -93,6 +93,7 @@ export class GuestSyscalls {
     if (number === SYS.close) return this.close();
     if (number === SYS.read) return this.read();
     if (number === SYS.lseek) return this.seek();
+    if (number === SYS.fstat) return this.stat(this.cpu.readRegister("x1"));
     if (number === SYS.clock_gettime) return this.clockGetTime();
     if (number === SYS.clock_getres) return this.clockGetRes();
     if (number === SYS.gettimeofday) return this.getTimeOfDay();
@@ -164,6 +165,28 @@ export class GuestSyscalls {
     if (position < 0n || position > BigInt(file.bytes.length)) { this.cpu.writeRegister("x0", BigInt(-EINVAL)); return true; }
     file.position = Number(position);
     this.cpu.writeRegister("x0", position);
+    return true;
+  }
+
+  /**
+   * Writes the arm64 `struct stat` (asm-generic/stat.h) for an open descriptor.
+   * Descriptors only ever hold regular in-process files, so the mode is a plain file.
+   */
+  private stat(target: bigint): boolean {
+    const descriptor = Number(BigInt.asIntN(32, this.cpu.readRegister("x0"))), file = this.descriptors.get(descriptor);
+    if (!file) { this.cpu.writeRegister("x0", BigInt(-EBADF)); return true; }
+    const bytes = new Uint8Array(128), view = new DataView(bytes.buffer);
+    const regularFile = 0o100000, permissions = 0o444;
+    view.setBigUint64(0, 0n, true);                       // st_dev
+    view.setBigUint64(8, BigInt(descriptor), true);        // st_ino
+    view.setUint32(16, regularFile | permissions, true);   // st_mode
+    view.setUint32(20, 1, true);                           // st_nlink
+    view.setBigInt64(48, BigInt(file.bytes.length), true); // st_size
+    view.setInt32(56, 4096, true);                         // st_blksize
+    view.setBigInt64(64, BigInt(Math.ceil(file.bytes.length / 512)), true); // st_blocks
+    try { writeGuestBytes(this.cpu, target, bytes); }
+    catch { this.cpu.writeRegister("x0", BigInt(-EFAULT)); return true; }
+    this.cpu.writeRegister("x0", 0n);
     return true;
   }
 

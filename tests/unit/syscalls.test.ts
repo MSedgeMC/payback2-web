@@ -87,3 +87,27 @@ test("guest descriptors read a truthful process map and reject bad descriptors",
     assert.ok(syscalls.notices.some(notice => notice.includes("/proc/self/nope")));
   } finally { cpu.unmap(buffer, 4096n); syscalls.dispose(); cpu.unmap(code, 4096n); cpu.unmap(data, 4096n); cpu.close(); }
 });
+
+test("guest fstat describes an open synthetic file with the arm64 stat layout", async () => {
+  const cpu = await createRuntime(), syscalls = new GuestSyscalls(cpu);
+  const code = 0x30000n, data = 0x40000n, buffer = 0x41000n, stat = 0x42000n;
+  try {
+    cpu.map(code, 4096n, 5); cpu.map(data, 4096n, 3); cpu.map(buffer, 4096n, 3); cpu.map(stat, 4096n, 3);
+    cpu.copyIn(code, new Uint8Array([0x01, 0x00, 0x00, 0xd4]));
+    cpu.copyIn(data, new TextEncoder().encode("/proc/self/maps\0"));
+    const call = (number: number, args: bigint[] = []) => {
+      cpu.writeRegister("x8", BigInt(number)); args.forEach((value, index) => cpu.writeRegister(`x${index}` as `x${number}`, value));
+      syscalls.handle(code + 4n); return BigInt.asIntN(64, cpu.readRegister("x0"));
+    };
+    const descriptor = call(SYS.openat, [0n, data, 0n, 0n]);
+    assert.equal(call(SYS.fstat, [descriptor, stat]), 0n);
+    const bytes = cpu.copyOut(stat, 128), view = new DataView(bytes.buffer, bytes.byteOffset, 128);
+    assert.equal(view.getUint32(16, true), 0o100444, "a regular, read-only file");
+    assert.equal(view.getUint32(20, true), 1);
+    assert.ok(view.getBigInt64(48, true) > 0n, "the map file has a real size");
+    assert.equal(view.getInt32(56, true), 4096);
+    assert.equal(view.getBigInt64(64, true), (view.getBigInt64(48, true) + 511n) / 512n);
+    assert.equal(call(SYS.fstat, [77n, stat]), -9n);
+    assert.equal(call(SYS.fstat, [descriptor, 8n]), -14n);
+  } finally { syscalls.dispose(); for (const address of [code, data, buffer, stat]) cpu.unmap(address, 4096n); cpu.close(); }
+});
