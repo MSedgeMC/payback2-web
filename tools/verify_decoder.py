@@ -10,8 +10,8 @@ Comparison rules:
   * an instruction our decoder rejects is "unsupported" and is never compared;
   * an instruction our decoder accepts is compared against Capstone's mnemonic and
     operands; a rendering our instruction model cannot express (inverted logical
-    operands, 32-bit or SIMD register pairs, scaled index registers, bitfield aliases,
-    ...) counts as "not compared" and is listed separately, never as a failure;
+    operands, SIMD register pairs, scaled index registers, bitfield aliases, ...) counts
+    as "not compared" and is listed separately, never as a failure;
   * only the field names the decoder actually exposes are compared, so the checker keeps
     working while the decoder gains fields.
 
@@ -48,11 +48,11 @@ INVERTED_CONDITIONS = {"eq": "ne", "ne": "eq", "cs": "cc", "cc": "cs", "mi": "pl
                        "gt": "le", "le": "gt", "al": "nv", "nv": "al"}
 WIDTH_REGISTERS = {"x": 64, "xzr": 64, "sp": 64, "w": 32, "wzr": 32, "wsp": 32}
 EXTEND_IDENTITY = {"uxtx", "sxtx"}          # Xm extended to 64 bits is Xm
-# mnemonic -> (size, signed) or None when the size follows the destination register.
 # Hint-space renderings the decoder accepts as state-free no-ops by design (PAC, BTI, ...).
 HINT_MNEMONICS = {"nop", "yield", "wfe", "wfi", "sev", "sevl", "esb", "csdb", "psb", "tsb", "dgh",
                   "hint", "bti", "paciasp", "pacibsp", "autiasp", "autibsp", "paciaz", "pacibz",
                   "autiaz", "autibz", "xpaclri", "pacga"}
+# mnemonic -> (size, signed), or None when the access size follows the destination register.
 LOAD_SIZES = {
     "ldr": None, "str": None, "ldur": None, "stur": None,
     "ldrb": (8, False), "strb": (8, False), "ldurb": (8, False), "sturb": (8, False),
@@ -210,6 +210,15 @@ def check_number(problems: list[str], field: str, ours: dict, expected: int) -> 
         return
     if actual != expected:
         problems.append(f"{field}: ours {render(actual)} != capstone {render(expected)}")
+
+
+def check_target(problems: list[str], ours: dict, expected: int) -> None:
+    """Branch targets are compared as unsigned 64-bit values: Capstone prints them wrapped."""
+    actual = number_field(ours, "target")
+    if actual is None:
+        return
+    if (actual & MASK64) != (expected & MASK64):
+        problems.append(f"target: ours {render(actual)} != capstone {render(expected)}")
 
 
 def check_register(problems: list[str], ours: dict, field: str, parsed: tuple[int, str] | None) -> None:
@@ -454,7 +463,7 @@ def compare_test_bit(ours: dict, insn, ops: list[str], problems: list[str]) -> b
     check_register(problems, ours, "register", operand)
     check_number(problems, "bit", ours, bit)
     check_field(problems, "branchIfSet", ours, insn.mnemonic == "tbnz")
-    check_number(problems, "target", ours, target)
+    check_target(problems, ours, target)
     check_width(problems, ours, [operand[1]])
     return True
 
@@ -720,7 +729,7 @@ def compare_branch(ours: dict, insn, ops: list[str], problems: list[str]) -> boo
     target = immediate_operand(ops[0])
     if target is None:
         return None
-    check_number(problems, "target", ours, target)
+    check_target(problems, ours, target)
     return True
 
 
@@ -730,7 +739,7 @@ def compare_branch_link(ours: dict, insn, ops: list[str], problems: list[str]) -
     target = immediate_operand(ops[0])
     if target is None:
         return None
-    check_number(problems, "target", ours, target)
+    check_target(problems, ours, target)
     return True
 
 
@@ -741,7 +750,7 @@ def compare_branch_conditional(ours: dict, insn, ops: list[str], problems: list[
     if target is None:
         return None
     check_field(problems, "condition", ours, CONDITION_ALIASES.get(insn.mnemonic[2:], insn.mnemonic[2:]))
-    check_number(problems, "target", ours, target)
+    check_target(problems, ours, target)
     return True
 
 
@@ -753,7 +762,7 @@ def compare_compare_zero(ours: dict, insn, ops: list[str], problems: list[str]) 
         return None
     check_register(problems, ours, "register", operand)
     check_field(problems, "branchIfZero", ours, insn.mnemonic == "cbz")
-    check_number(problems, "target", ours, target)
+    check_target(problems, ours, target)
     check_width(problems, ours, [operand[1]])
     return True
 
@@ -917,8 +926,8 @@ def main(argv: list[str] | None = None) -> int:
             mismatches.append((address, word, describe(entry), problems + [f"capstone: {instruction.mnemonic} {instruction.op_str}".strip()]))
 
     total = len(decoded)
-    print(f"file:     {path} (sha256 {digest}")
-    print(f"          {'matches the known build' if known else 'DIFFERS from the known build'})")
+    print(f"file:     {path}")
+    print(f"sha256:   {digest} ({'matches the known build' if known else 'DIFFERS from the known build'})")
     print(f"range:    {hex(start)} + {hex(length)} bytes ({length // 4} instructions), max {arguments.max}")
     print(f"capstone: {len(instructions)} of {len(code) // 4} four-byte units disassembled")
     print()

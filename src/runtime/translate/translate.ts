@@ -161,6 +161,7 @@ function emitBlock(body: Code, block: Decoded[], context: {
         // Both operands must stay on the operand stack for the binary instruction.
         operand(instruction.rn, false);
         shifted(instruction.rm, instruction.shift, instruction.amount);
+        if (instruction.invert) { body.i64(-1n); body.raw(OP.xor64); }
         body.raw(instruction.kind === "andReg" ? I64_AND : instruction.kind === "orrReg" ? OP.or64 : OP.xor64);
         body.set(T2);
         store(instruction.rd, false, instruction.width);

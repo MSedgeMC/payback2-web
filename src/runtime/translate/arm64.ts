@@ -12,11 +12,11 @@ export type Instruction =
   | { kind: "subImm"; rd: number; rn: number; immediate: bigint; flags: boolean; width: Width }
   | { kind: "addReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; width: Width }
   | { kind: "subReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; width: Width }
-  | { kind: "andReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; width: Width }
+  | { kind: "andReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; flags: boolean; invert: boolean; width: Width }
   | { kind: "logicImm"; rd: number; rn: number; operation: "and" | "orr" | "eor"; value: bigint; flags: boolean; width: Width }
   | { kind: "testBit"; register: number; bit: number; target: number; branchIfSet: boolean; width: Width }
-  | { kind: "orrReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; width: Width }
-  | { kind: "eorReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; width: Width }
+  | { kind: "orrReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; invert: boolean; width: Width }
+  | { kind: "eorReg"; rd: number; rn: number; rm: number; shift: "lsl" | "lsr" | "asr"; amount: number; invert: boolean; width: Width }
   | { kind: "madd"; rd: number; rn: number; rm: number; ra: number; subtract: boolean; width: Width }
   | { kind: "divide"; rd: number; rn: number; rm: number; signed: boolean; width: Width }
   | { kind: "multiplyLong"; rd: number; rn: number; rm: number; ra: number; subtract: boolean; signed: boolean }
@@ -116,6 +116,8 @@ export function decode(address: number, word: number): Instruction {
   }
   // Add/subtract shifted register.
   if (((word & 0x1f000000) >>> 0) === 0x0b000000) {
+    // Bit 21 selects the extended-register form (with an extend operator) rather than a shift.
+    if (((word >>> 21) & 1) === 1) throw new UnsupportedInstruction(address, word);
     const shiftCode = (word >>> 22) & 3;
     if (shiftCode > 2) throw new UnsupportedInstruction(address, word);
     const amount = (word >>> 10) & 0x3f, rm = (word >>> 16) & 31;
@@ -129,10 +131,10 @@ export function decode(address: number, word: number): Instruction {
     if (shiftCode > 2 || (word & 0x800) !== 0) throw new UnsupportedInstruction(address, word);
     const amount = (word >>> 10) & 0x3f, rm = (word >>> 16) & 31, opc = (word >>> 29) & 3;
     if (width === 32 && amount > 31) throw new UnsupportedInstruction(address, word);
-    const shift = shifts[shiftCode]!, flags = opc === 3;
-    if (opc === 0 || opc === 3) return { kind: "andReg", rd, rn, rm, shift, amount, flags, width };
-    if (opc === 1) return { kind: "orrReg", rd, rn, rm, shift, amount, width };
-    return { kind: "eorReg", rd, rn, rm, shift, amount, width };
+    const shift = shifts[shiftCode]!, flags = opc === 3, invert = ((word >>> 21) & 1) === 1;
+    if (opc === 0 || opc === 3) return { kind: "andReg", rd, rn, rm, shift, amount, flags, invert, width };
+    if (opc === 1) return { kind: "orrReg", rd, rn, rm, shift, amount, invert, width };
+    return { kind: "eorReg", rd, rn, rm, shift, amount, invert, width };
   }
   // Multiply-add/subtract, including the MUL/MNEG aliases (Ra = 31).
   if (((word >>> 24) & 0x1f) === 0x1b && ((word >>> 21) & 7) === 0) {
