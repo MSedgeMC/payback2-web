@@ -8,11 +8,17 @@ on their device.
 
 **Status: experimental native startup. Gameplay is not available yet.**
 The original native dependency completes initialization, registers its Java
-native method, and returns JNI version 1.6. Startup then enters the main engine's
-constructors, including Java string creation, Object arrays, and Long boxing.
-Execution currently stops at managed Java callback execution
-(`JNI.CallStaticObjectMethodV`). Engine initialization, rendering, gameplay
+native method, and returns JNI version 1.6. The main engine then enters its own
+constructors and calls into the protected dependency's virtual machine, which
+runs a self-integrity hash over its own code, reads its process map, and starts
+native threads. Execution currently stops on an unsynchronised condition
+variable wait (`pthread_cond_wait`). Engine initialization, rendering, gameplay
 input, and audio remain unfinished.
+
+Measured execution throughput is the project's largest open problem: the
+AArch64 interpreter reaches roughly 1.5 million guest instructions per second,
+about three orders of magnitude below what a real-time 3D frame requires. See
+`docs/PERFORMANCE.md`.
 
 The browser interface reports loading and compatibility diagnostics. It does
 not yet provide a playable scene.
@@ -22,7 +28,9 @@ not yet provide a playable scene.
 - ARM64 execution in WebAssembly inside a dedicated worker with bounded execution.
 - Validated ELF64 loading, BSS initialization, AArch64 RELA relocations, and native dependency linking.
 - Local APKM and ARM64 split APK import with verification against the supported engine, dependency, and startup bytecode.
-- JNI class and method lookup, native registration, typed references, strings, Object arrays, and the observed Long constructor.
+- JNI class and method lookup, native registration, typed references, strings, arrays, byte regions, constructors, and the instance call family.
+- Direct guest kernel syscalls (clock, identity, descriptors, process map, entropy) with unimplemented numbers reported by name.
+- A read-only guest file system over the user's package, and cooperative native threads.
 - Explicit diagnostics for unsupported inputs, memory access, and native or Java calls.
 - Unit and Chromium integration checks using synthetic fixtures; game data is excluded from CI.
 
