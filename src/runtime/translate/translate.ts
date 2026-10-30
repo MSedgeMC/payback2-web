@@ -1,4 +1,4 @@
-import { Code, I64, OP, buildModule } from "./wasm.ts";
+import { Code, F64, I64, OP, buildModule } from "./wasm.ts";
 import type { LoadKind, StoreKind } from "./wasm.ts";
 import { decode, UnsupportedInstruction } from "./arm64.ts";
 import type { Condition, Instruction } from "./arm64.ts";
@@ -6,8 +6,11 @@ import type { Condition, Instruction } from "./arm64.ts";
 // The register file lives in linear memory so the host can seed and inspect it.
 // Offsets: x0..x30 = 0..247, sp = 248, nzcv = 256, pc = 264.
 export const REGISTER_FILE_BYTES = 34 * 8, STACK_POINTER_OFFSET = 31 * 8, FLAGS_OFFSET = 32 * 8, PC_OFFSET = 33 * 8;
+/** Floating-point register file follows the general registers: d0..d31. */
+export const FLOATING_REGISTERS_OFFSET = 34 * 8;
 const SP = 31, FLAGS = 32, PC = 33, T0 = 34, T1 = 35, T2 = 36, T3 = 37, INDEX = 38;
-const LOCAL_COUNT = 39;
+// 32 floating-point registers plus two scratch values follow the integer locals.
+const INTEGER_LOCALS = 39, F0 = 39, FT0 = 71, FT1 = 72, FLOAT_LOCALS = 34;
 const FLAG_N = 1n << 31n, FLAG_Z = 1n << 30n, FLAG_C = 1n << 29n, FLAG_V = 1n << 28n;
 const I64_AND = 0x83, I64_SHR_U = 0x88, I32_AND = 0x71, I32_OR = 0x72;
 
@@ -16,7 +19,8 @@ export type UnsupportedSite = { address: number; word: number };
 export type TranslationResult = { module: WebAssembly.Module; entry: number; blocks: number; instructions: number; unsupported: UnsupportedSite[] };
 
 /** Translates [start, end) into one WASM function with an in-module basic block dispatcher. */
-export function translate(bytes: Uint8Array, start: number, end: number, memoryPages = 1): TranslationResult {
+export function translate(bytes: Uint8Array, start: number, end: number, memoryPages = 1, shareMemory = false,
+                          registerFileOffset = 0): TranslationResult {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start % 4 || end % 4 || start < 0 || end > bytes.length || start >= end) {
     throw new RangeError("Invalid translation range");
   }
@@ -32,9 +36,14 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
       decoded.push({ kind: "unsupported", address, word }); continue;
     }
     decoded.push({ ...instruction, address, word });
-    if (instruction.kind === "branch" || instruction.kind === "branchCond" || instruction.kind === "compareZero") {
-      leaders.add(instruction.target); leaders.add(address + 4);
-    } else if (instruction.kind === "branchLink" || instruction.kind === "return") leaders.add(address + 4);
+    // Any instruction carrying a target starts a block there, and a conditional branch also
+    // starts one at its fallthrough.
+    if ("target" in instruction) {
+      leaders.add(instruction.target);
+      if (instruction.kind !== "branch") leaders.add(address + 4);
+    } else if (instruction.kind === "return") {
+      leaders.add(address + 4);
+    }
   }
   const addresses = [...leaders].filter(address => address >= start && address < end).sort((a, b) => a - b);
   const indexOf = new Map(addresses.map((address, index) => [address, index]));
@@ -49,7 +58,10 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
   }
 
   const count = blocks.length, body = new Code();
-  for (let local = 0; local < 34; local++) { body.i32(local * 8); body.load("i64", 0); body.set(local); }
+  for (let local = 0; local < 34; local++) { body.i32(registerFileOffset + local * 8); body.load("i64", 0); body.set(local); }
+  for (let local = 0; local < 32; local++) {
+    body.i32(registerFileOffset + FLOATING_REGISTERS_OFFSET + local * 8); body.load("f64", 0); body.setF(F0 + local);
+  }
   // Dispatch on a block index, resolving the entry pc once per call so that re-entry at an
   // arbitrary address (a returned-to caller) still lands on the right block.
   body.i64(0n); body.set(INDEX);
@@ -70,9 +82,12 @@ export function translate(bytes: Uint8Array, start: number, end: number, memoryP
   });
   body.end();                                     // DISPATCH
   body.end();                                     // EXIT
-  for (let local = 0; local < 34; local++) { body.i32(local * 8); body.get(local); body.store("i64", 0); }
+  for (let local = 0; local < 34; local++) { body.i32(registerFileOffset + local * 8); body.get(local); body.store("i64", 0); }
+  for (let local = 0; local < 32; local++) {
+    body.i32(registerFileOffset + FLOATING_REGISTERS_OFFSET + local * 8); body.getF(F0 + local); body.store("f64", 0);
+  }
   // buildModule appends the function's terminating end.
-  const binary = buildModule(body, [{ count: LOCAL_COUNT, type: I64 }], memoryPages);
+  const binary = buildModule(body, [{ count: INTEGER_LOCALS, type: I64 }, { count: FLOAT_LOCALS, type: F64 }], memoryPages, shareMemory);
   const module = new WebAssembly.Module(binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength) as ArrayBuffer);
   return { module, entry: start, blocks: count, instructions: decoded.length, unsupported };
 }
@@ -100,6 +115,19 @@ function emitBlock(body: Code, block: Decoded[], context: {
     if (!amount) return;
     body.i64(BigInt(amount));
     body.raw(shift === "lsl" ? OP.shl64 : shift === "lsr" ? OP.shrU64 : OP.shrS64);
+  };
+  const fpGet = (register: number, precision: 32 | 64): void => {
+    body.getF(F0 + register);
+    if (precision === 32) body.raw(OP.f32demote);
+  };
+  const fpPut = (register: number, precision: 32 | 64): void => {
+    if (precision === 32) body.raw(OP.f64promote);
+    body.setF(F0 + register);
+  };
+  const foldOffset = (offset: number): number => {
+    if (offset >= 0) return offset;
+    body.get(T3); body.i64(BigInt(offset)); body.raw(OP.add64); body.set(T3);
+    return 0;
   };
   const store = (rd: number, spIsOperand: boolean, width: 32 | 64): void => {
     widthMask(T2, width);
@@ -279,8 +307,9 @@ function emitBlock(body: Code, block: Decoded[], context: {
           body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64); body.set(T3);
           body.get(T3); body.set(instruction.rn === 31 ? SP : instruction.rn);
         }
+        const offset = instruction.writeback === undefined ? foldOffset(instruction.offset) : 0;
         body.get(T3); body.raw(OP.wrapI64);
-        body.load(loadKind(instruction.size, instruction.signed), instruction.writeback === "pre" ? 0 : instruction.offset);
+        body.load(loadKind(instruction.size, instruction.signed), offset);
         body.set(instruction.rd);
         if (instruction.writeback === "post") {
           body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
@@ -300,9 +329,10 @@ function emitBlock(body: Code, block: Decoded[], context: {
           body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64); body.set(T3);
           body.get(T3); body.set(instruction.rn === 31 ? SP : instruction.rn);
         }
+        const offset = instruction.writeback === undefined ? foldOffset(instruction.offset) : 0;
         body.get(T3); body.raw(OP.wrapI64);
         if (instruction.rt === 31) body.i64(0n); else body.get(instruction.rt);
-        body.store(storeKind(instruction.size), instruction.writeback === "pre" ? 0 : instruction.offset);
+        body.store(storeKind(instruction.size), offset);
         if (instruction.writeback === "post") {
           body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
           body.set(instruction.rn === 31 ? SP : instruction.rn);
@@ -312,7 +342,11 @@ function emitBlock(body: Code, block: Decoded[], context: {
       case "loadPair": case "storePair": {
         const stride = instruction.size / 8;
         operand(instruction.rn, true); body.set(T3);
-        const address = (extra: number): void => { body.get(T3); if (extra) { body.i64(BigInt(extra)); body.raw(OP.add64); } body.raw(OP.wrapI64); };
+        const address = (extra: number): void => {
+          body.get(T3);
+          if (extra) { body.i64(BigInt(extra)); body.raw(OP.add64); }
+          body.raw(OP.wrapI64);
+        };
         const kind = instruction.kind === "loadPair" && instruction.signed ? "i64_32s" as const
           : instruction.size === 64 ? "i64" as const : "i64_32u" as const;
         if (instruction.kind === "loadPair") {
@@ -328,6 +362,154 @@ function emitBlock(body: Code, block: Decoded[], context: {
           const adjustment = instruction.writeback === "post" ? instruction.offset : instruction.offset;
           body.get(instruction.rn === 31 ? SP : instruction.rn);
           body.i64(BigInt(adjustment)); body.raw(OP.add64);
+          body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        break;
+      }
+      case "fpBinary": {
+        const single = instruction.precision === 32;
+        fpGet(instruction.rn, instruction.precision); fpGet(instruction.rm, instruction.precision);
+        const table = single
+          ? { add: OP.f32add, sub: OP.f32sub, mul: OP.f32mul, div: OP.f32div, max: OP.f32max, min: OP.f32min }
+          : { add: OP.f64add, sub: OP.f64sub, mul: OP.f64mul, div: OP.f64div, max: OP.f64max, min: OP.f64min };
+        body.raw(table[instruction.operation]);
+        fpPut(instruction.rd, instruction.precision);
+        break;
+      }
+      case "fpUnary": {
+        const single = instruction.precision === 32;
+        fpGet(instruction.rn, instruction.precision);
+        if (instruction.operation !== "mov") {
+          const table = single
+            ? { neg: OP.f32neg, abs: OP.f32abs, sqrt: OP.f32sqrt, mov: 0 }
+            : { neg: OP.f64neg, abs: OP.f64abs, sqrt: OP.f64sqrt, mov: 0 };
+          body.raw(table[instruction.operation]);
+        }
+        fpPut(instruction.rd, instruction.precision);
+        break;
+      }
+      case "fpCompare": {
+        // AArch64 defines comparison flags directly: N = less, Z = equal, C = greater or
+        // unordered, V = unordered.
+        const single = instruction.precision === 32;
+        fpGet(instruction.rn, instruction.precision); body.setF(FT0);
+        if (instruction.rm === undefined) { body.f64(0); body.setF(FT1); } else { fpGet(instruction.rm, instruction.precision); body.setF(FT1); }
+        const opcode = (double: number, half: number): number => single ? half : double;
+        const comparison = (code: number): void => { body.getF(FT0); body.getF(FT1); body.raw(code); };
+        const pack = (code: number, bit: number): void => {
+          comparison(code); body.raw(OP.extendI32U); body.i64(BigInt(bit)); body.raw(OP.shl64);
+        };
+        const unordered = (local: number): void => { body.getF(local); body.getF(local); body.raw(opcode(OP.f64ne, OP.f32ne)); };
+        pack(opcode(OP.f64lt, OP.f32lt), 31);                 // N
+        pack(opcode(OP.f64eq, OP.f32eq), 30); body.raw(OP.or64);   // Z
+        pack(opcode(OP.f64ge, OP.f32ge), 29); body.raw(OP.or64);
+        unordered(FT0); unordered(FT1); body.raw(I32_OR);     // V = either operand NaN
+        body.raw(OP.extendI32U); body.i64(28n); body.raw(OP.shl64);
+        body.raw(OP.or64);
+        body.set(FLAGS);
+        break;
+      }
+      case "fpSelect": {
+        // Selection happens at the register width, so no rounding is involved.
+        body.getF(F0 + instruction.rn); body.getF(F0 + instruction.rm);
+        emitCondition(body, instruction.condition); body.raw(OP.select);
+        body.setF(F0 + instruction.rd);
+        break;
+      }
+      case "fpMoveToGp": {
+        if (instruction.precision === 32) {
+          body.getF(F0 + instruction.rn); body.raw(OP.f32demote); body.raw(OP.i32reinterpretF32);
+          body.raw(OP.extendI32U); body.set(instruction.rd);
+        } else {
+          body.getF(F0 + instruction.rn); body.raw(OP.i64reinterpretF64); body.set(instruction.rd);
+        }
+        break;
+      }
+      case "fpMoveFromGp": {
+        if (instruction.precision === 32) {
+          body.get(instruction.rn); body.i64(0xffffffffn); body.raw(I64_AND); body.raw(OP.wrapI64);
+          body.raw(OP.f32reinterpretI32); body.raw(OP.f64promote); body.setF(F0 + instruction.rd);
+        } else {
+          body.get(instruction.rn); body.raw(OP.f64reinterpretI64); body.setF(F0 + instruction.rd);
+        }
+        break;
+      }
+      case "fpConvertFromInt": {
+        body.get(instruction.rn);
+        if (instruction.width === 32) {
+          body.i64(32n); body.raw(instruction.signed ? OP.shl64 : OP.shrU64);
+          if (instruction.signed) body.raw(OP.shrS64);
+        }
+        const table = instruction.precision === 32
+          ? { s: OP.f32convertIS, u: OP.f32convertIU } : { s: OP.f64convertIS, u: OP.f64convertIU };
+        body.raw(instruction.signed ? table.s : table.u);
+        fpPut(instruction.rd, instruction.precision);
+        break;
+        break;
+      }
+      case "fpConvertToInt": {
+        fpGet(instruction.rn, instruction.precision);
+        const kind = instruction.precision === 32
+          ? (instruction.signed ? "i64_f32_s" as const : "i64_f32_u" as const)
+          : (instruction.signed ? "i64_s" as const : "i64_u" as const);
+        body.truncSat(kind);
+        if (instruction.width === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
+        body.set(instruction.rd);
+        break;
+      }
+      case "fpLoadStore": {
+        operand(instruction.rn, true);
+        if (instruction.rm !== undefined) {
+          body.get(instruction.rm);
+          if (instruction.indexWidth === 32) { body.i64(0xffffffffn); body.raw(I64_AND); }
+          body.raw(OP.add64);
+        }
+        body.set(T3);
+        if (instruction.writeback === "pre") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64); body.set(T3);
+          body.get(T3); body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        const foldedOffset = instruction.writeback === undefined ? foldOffset(instruction.offset) : 0;
+        body.get(T3); body.raw(OP.wrapI64);
+        const kind = instruction.precision === 32 ? "f32" as const : "f64" as const;
+        if (instruction.load) {
+          body.load(kind, foldedOffset);
+          if (instruction.precision === 32) body.raw(OP.f64promote);
+          body.setF(F0 + instruction.register);
+        } else {
+          if (instruction.precision === 32) body.getF(F0 + instruction.register), body.raw(OP.f32demote);
+          else body.getF(F0 + instruction.register);
+          body.store(kind, foldedOffset);
+        }
+        if (instruction.writeback === "post") {
+          body.get(T3); body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
+          body.set(instruction.rn === 31 ? SP : instruction.rn);
+        }
+        break;
+      }
+      case "fpPair": {
+        operand(instruction.rn, true); body.set(T3);
+        const address = (extra: number): void => { body.get(T3); if (extra) { body.i64(BigInt(extra)); body.raw(OP.add64); } body.raw(OP.wrapI64); };
+        const kind = instruction.precision === 32 ? "f32" as const : "f64" as const;
+        const stride = instruction.precision === 32 ? 4 : 8;
+        const push = (register: number): void => {
+          body.getF(F0 + register);
+          if (instruction.precision === 32) body.raw(OP.f32demote);
+        };
+        if (instruction.load) {
+          address(instruction.offset); body.load(kind, 0);
+          if (instruction.precision === 32) body.raw(OP.f64promote);
+          body.setF(F0 + instruction.rt);
+          address(instruction.offset + stride); body.load(kind, 0);
+          if (instruction.precision === 32) body.raw(OP.f64promote);
+          body.setF(F0 + instruction.rt2);
+        } else {
+          address(instruction.offset); push(instruction.rt); body.store(kind, 0);
+          address(instruction.offset + stride); push(instruction.rt2); body.store(kind, 0);
+        }
+        if (instruction.writeback !== "none") {
+          body.get(instruction.rn === 31 ? SP : instruction.rn);
+          body.i64(BigInt(instruction.offset)); body.raw(OP.add64);
           body.set(instruction.rn === 31 ? SP : instruction.rn);
         }
         break;

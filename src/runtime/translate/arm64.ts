@@ -38,6 +38,16 @@ export type Instruction =
   | { kind: "branchLinkReg"; rn: number }
   | { kind: "branchCond"; condition: Condition; target: number }
   | { kind: "compareZero"; register: number; target: number; branchIfZero: boolean; width: Width }
+  | { kind: "fpBinary"; precision: 32 | 64; operation: "add" | "sub" | "mul" | "div" | "max" | "min"; rd: number; rn: number; rm: number }
+  | { kind: "fpUnary"; precision: 32 | 64; operation: "neg" | "abs" | "sqrt" | "mov"; rd: number; rn: number }
+  | { kind: "fpCompare"; precision: 32 | 64; rn: number; rm?: number }
+  | { kind: "fpSelect"; precision: 32 | 64; rd: number; rn: number; rm: number; condition: Condition }
+  | { kind: "fpMoveToGp"; rd: number; rn: number; width: Width; precision: 32 | 64 }
+  | { kind: "fpMoveFromGp"; rd: number; rn: number; width: Width; precision: 32 | 64 }
+  | { kind: "fpConvertFromInt"; rd: number; rn: number; signed: boolean; width: Width; precision: 32 | 64 }
+  | { kind: "fpConvertToInt"; rd: number; rn: number; signed: boolean; width: Width; precision: 32 | 64 }
+  | { kind: "fpLoadStore"; precision: 32 | 64; register: number; rn: number; rm?: number; indexWidth?: Width; offset: number; writeback?: "pre" | "post"; load: boolean }
+  | { kind: "fpPair"; precision: 32 | 64; rt: number; rt2: number; rn: number; offset: number; load: boolean; writeback: "none" | "pre" | "post" }
   | { kind: "return" }
   | { kind: "nop" };
 
@@ -103,7 +113,10 @@ export function decode(address: number, word: number): Instruction {
   // Logical (immediate) with a bitmask immediate.
   if (((word >>> 23) & 0x3f) === 0x24) {
     const opc = (word >>> 29) & 3, n = (word >>> 22) & 1, immediateR = (word >>> 16) & 0x3f, immediateS = (word >>> 10) & 0x3f;
-    const value = bitmaskImmediate(n, immediateR, immediateS, width);
+    // An undefined bitmask must be reported, never crash the translation pass.
+    let value: bigint;
+    try { value = bitmaskImmediate(n, immediateR, immediateS, width); }
+    catch { throw new UnsupportedInstruction(address, word); }
     const operation = opc === 0 || opc === 3 ? "and" as const : opc === 1 ? "orr" as const : "eor" as const;
     return { kind: "logicImm", rd, rn, operation, value, flags: opc === 3, width };
   }
@@ -159,7 +172,8 @@ export function decode(address: number, word: number): Instruction {
   }
   // Conditional select family.
   if (((word & 0x1fe00000) >>> 0) === 0x1a800000 && ((word >>> 10) & 3) <= 1) {
-    const rm = (word >>> 16) & 31, condition = conditions[word & 0xf]!;
+    // The condition of a conditional select lives in bits 15:12, not in the low nibble.
+    const rm = (word >>> 16) & 31, condition = conditions[(word >>> 12) & 0xf]!;
     if (condition === "nv") throw new UnsupportedInstruction(address, word);
     const op = (word >>> 30) & 1, increment = ((word >>> 10) & 1) === 1;
     return { kind: "select", rd, rn, rm, condition, invert: op === 1, increment, width };
@@ -170,6 +184,86 @@ export function decode(address: number, word: number): Instruction {
     const immediate = BigInt(signExtend(((word >>> 5) & 0x7ffff), 19)) << 2n | BigInt((word >>> 29) & 3);
     const base = BigInt(page ? address & ~0xfff : address);
     return { kind: "address", rd, value: base + (page ? immediate << 12n : immediate) };
+  }
+  // Scalar floating point, two sources.
+  if (((word & 0xff20fc00) >>> 0) === 0x1e200800 || ((word & 0xff20fc00) >>> 0) === 0x1e201800 ||
+      ((word & 0xff20fc00) >>> 0) === 0x1e202800 || ((word & 0xff20fc00) >>> 0) === 0x1e203800 ||
+      ((word & 0xff20fc00) >>> 0) === 0x1e204800 || ((word & 0xff20fc00) >>> 0) === 0x1e205800) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    const selector = (word >>> 10) & 0xf;
+    const map = { 0x8: "mul", 0x9: "div", 0xa: "add", 0xb: "sub", 0xc: "max", 0xd: "min" } as const;
+    const chosen = map[selector as keyof typeof map];
+    if (!chosen) throw new UnsupportedInstruction(address, word);
+    return { kind: "fpBinary", precision, operation: chosen, rd, rn, rm: (word >>> 16) & 31 };
+  }
+  // Scalar floating point, one source (FMOV, FNEG, FABS, FSQRT).
+  if (((word & 0xff3ffc00) >>> 0) === 0x1e204000 || ((word & 0xff3ffc00) >>> 0) === 0x1e20c000 ||
+      ((word & 0xff3ffc00) >>> 0) === 0x1e214000 || ((word & 0xff3ffc00) >>> 0) === 0x1e21c000) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    const selector = (word >>> 10) & 0x3f;
+    const operation = selector === 0x00 ? "mov" as const : selector === 0x01 ? "abs" as const
+      : selector === 0x02 ? "neg" as const : "sqrt" as const;
+    return { kind: "fpUnary", precision, operation, rd, rn };
+  }
+  // FCMP / FCMPE, including the comparison against zero.
+  if (((word & 0xff20fc07) >>> 0) === 0x1e202000) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    const rm = (word >>> 16) & 31, againstZero = (word & 0x7) === 0x8;
+    return { kind: "fpCompare", precision, rn, ...(againstZero ? {} : { rm }) };
+  }
+  // FCSEL.
+  if (((word & 0xff200c00) >>> 0) === 0x1e200c00) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    const condition = conditions[(word >>> 12) & 0xf]!;
+    if (condition === "nv") throw new UnsupportedInstruction(address, word);
+    return { kind: "fpSelect", precision, rd, rn, rm: (word >>> 16) & 31, condition };
+  }
+  // FMOV between a general register and a floating-point register.
+  if (((word & 0xffe0fc00) >>> 0) === 0x1e260000 || ((word & 0xffe0fc00) >>> 0) === 0x1e270000 ||
+      ((word & 0xffe0fc00) >>> 0) === 0x9e660000 || ((word & 0xffe0fc00) >>> 0) === 0x9e670000) {
+    const selector = (word >>> 16) & 0x1f, toGp = selector === 0 || selector === 6;
+    const width: Width = ((word >>> 31) & 1) === 1 ? 64 : 32;
+    const precision: 32 | 64 = width === 64 ? 64 : 32;
+    return toGp ? { kind: "fpMoveToGp", rd, rn, width, precision } : { kind: "fpMoveFromGp", rd, rn, width, precision };
+  }
+  // SCVTF / UCVTF: integer to floating point.
+  if (((word & 0xff3ffc00) >>> 0) === 0x1e220000 || ((word & 0xff3ffc00) >>> 0) === 0x1e230000) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    return { kind: "fpConvertFromInt", precision, rd, rn, signed: ((word >>> 16) & 1) === 0, width: ((word >>> 31) & 1) === 1 ? 64 : 32 };
+  }
+  // FCVTZS / FCVTZU: floating point to integer.
+  if (((word & 0xff3ffc00) >>> 0) === 0x1e380000 || ((word & 0xff3ffc00) >>> 0) === 0x1e390000) {
+    const precision: 32 | 64 = ((word >>> 22) & 1) === 1 ? 64 : 32;
+    return { kind: "fpConvertToInt", precision, rd, rn, signed: ((word >>> 16) & 1) === 0, width: ((word >>> 31) & 1) === 1 ? 64 : 32 };
+  }
+  // Load/store of a floating-point register (unsigned offset, and signed offset with writeback).
+  if (((word & 0x3f000000) >>> 0) === 0x3d000000) {
+    const sizeBits = (word >>> 30) & 3;
+    // Size 10/11 select quad or 128-bit lanes, which need the SIMD register file.
+    if (sizeBits > 1) throw new UnsupportedInstruction(address, word);
+    const precision: 32 | 64 = sizeBits === 0 ? 32 : 64;
+    const load = ((word >>> 22) & 1) === 1;
+    const scaled = ((word >>> 24) & 1) === 1;
+    const mode = (word >>> 10) & 3;
+    if (scaled && mode !== 0) throw new UnsupportedInstruction(address, word);
+    if (!scaled && mode === 2) throw new UnsupportedInstruction(address, word);
+    const offset = scaled ? ((word >>> 10) & 0xfff) * (sizeBits === 0 ? 4 : 8) : signExtend((word >>> 12) & 0x1ff, 9);
+    const writeback = !scaled && mode === 1 ? "post" as const : !scaled && mode === 3 ? "pre" as const : undefined;
+    const scale = sizeBits === 0 ? 4 : 8;
+    void scale;
+    return { kind: "fpLoadStore", precision, register: rd, rn, offset, load, ...(writeback ? { writeback } : {}) };
+  }
+  // Load/store pair of 64-bit floating-point registers.
+  if (((word & 0x3a000000) >>> 0) === 0x2c000000 || ((word & 0x3a000000) >>> 0) === 0x6c000000) {
+    if (((word >>> 26) & 1) === 0) {
+      const load = ((word >>> 22) & 1) === 1, mode = (word >>> 23) & 3, opc = (word >>> 30) & 3;
+      if (opc > 1) throw new UnsupportedInstruction(address, word);
+      const element = opc === 0 ? 4 : 8;
+      const precision: 32 | 64 = opc === 0 ? 32 : 64;
+      const immediate = Number(BigInt(signExtend((word >>> 15) & 0x7f, 7)) * BigInt(element));
+      const writeback = mode === 1 ? "post" as const : mode === 3 ? "pre" as const : "none" as const;
+      return { kind: "fpPair", precision, rt: word & 31, rt2: (word >>> 10) & 31, rn, offset: immediate, load, writeback };
+    }
   }
   // Load register literal.
   if (((word & 0x3b000000) >>> 0) === 0x18000000 && ((word >>> 26) & 1) === 0) {
